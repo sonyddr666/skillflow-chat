@@ -5,7 +5,7 @@ import { dirname, extname, join, normalize, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 9321);
-const HOST = process.env.HOST || "0.0.0.0";
+const HOST = "0.0.0.0";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const publicDir = join(__dirname, "public");
 const skillsDir = join(__dirname, "skills");
@@ -418,5 +418,5 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`SkillFlow server running at http://127.0.0.1:${PORT}`);
+  console.log(`SkillFlow server listening on ${HOST}:${PORT} (all container interfaces)`);
 });
