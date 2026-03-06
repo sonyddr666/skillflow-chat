@@ -230,8 +230,8 @@
 
     function mountShell() {
         if (shellMounted || !currentUser) return;
-        const topbar = document.getElementById('topbar');
-        if (!topbar) return;
+        const target = document.getElementById('cfg-account-slot') || document.getElementById('topbar');
+        if (!target) return;
 
         injectShellStyles();
 
@@ -245,7 +245,7 @@
             <button id="account-logout" type="button">Sair</button>
         `;
 
-        topbar.appendChild(shell);
+        target.appendChild(shell);
         shell.querySelector('#account-logout')?.addEventListener('click', logout);
         shellMounted = true;
     }

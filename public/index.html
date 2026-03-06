@@ -2158,6 +2158,559 @@
             border-radius: 2px;
             padding: 0 1px;
         }
+
+        :root[data-theme="dark"] {
+            --bg: #060606;
+            --surface: rgba(13, 13, 13, 0.94);
+            --s2: rgba(255, 255, 255, 0.045);
+            --border: rgba(255, 255, 255, 0.07);
+            --accent: #ff2fad;
+            --accent2: #ff66c4;
+            --text: #f1f1f1;
+            --muted: #8a8a8a;
+            --ububble: rgba(255, 255, 255, 0.08);
+            --mbubble: rgba(255, 255, 255, 0.045);
+        }
+
+        body {
+            background:
+                radial-gradient(circle at top center, rgba(255, 75, 192, 0.035), transparent 20%),
+                linear-gradient(180deg, #0c0c0c, #050505);
+        }
+
+        .noise-overlay {
+            opacity: 0.06;
+        }
+
+        #wrapper {
+            display: grid;
+            grid-template-columns: minmax(300px, 340px) minmax(0, 1fr);
+            flex: 1;
+            min-height: 0;
+            position: relative;
+        }
+
+        #sidebar {
+            width: auto;
+            min-width: 0;
+            background: rgba(10, 10, 10, 0.96);
+            border-right: 1px solid var(--border);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+        }
+
+        #sb-head {
+            padding: 22px 20px 14px;
+            border-bottom: none;
+            display: grid;
+            grid-template-columns: 42px 1fr 42px;
+            align-items: center;
+        }
+
+        #sb-head>span,
+        #sb-back {
+            display: grid;
+            place-items: center;
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            border: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.03);
+            font-size: 20px !important;
+        }
+
+        #sb-back {
+            color: var(--text);
+            cursor: pointer;
+            padding: 0;
+        }
+
+        #sb-head h2 {
+            background: none;
+            -webkit-background-clip: initial;
+            -webkit-text-fill-color: currentColor;
+            color: var(--text);
+            font-size: 30px;
+            font-weight: 800;
+            letter-spacing: -0.03em;
+            text-align: center;
+        }
+
+        #sb-close {
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            border: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.03);
+            display: grid;
+            place-items: center;
+            font-size: 18px;
+            color: var(--text);
+        }
+
+        #sb-actions {
+            padding: 0 20px 14px;
+            gap: 10px;
+        }
+
+        .action-btn {
+            border-style: solid;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.025);
+            min-height: 40px;
+        }
+
+        #search-box {
+            margin: 0 20px 18px;
+            min-height: 62px;
+            padding: 0 18px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            color: #8e949f;
+            font-size: 17px;
+        }
+
+        #conv-list {
+            padding: 0 14px 18px;
+        }
+
+        .ci {
+            min-height: 92px;
+            margin-bottom: 12px;
+            padding: 16px 18px;
+            border-radius: 28px;
+            background: rgba(255, 255, 255, 0.035);
+            border: 1px solid rgba(255, 47, 173, 0.12);
+            color: var(--text);
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .ci.active {
+            background: rgba(255, 255, 255, 0.06);
+            border-color: rgba(255, 47, 173, 0.22);
+            color: var(--text);
+        }
+
+        .ci-title {
+            font-size: 16px;
+            font-weight: 700;
+        }
+
+        .ci-del {
+            opacity: 1;
+            color: var(--muted);
+        }
+
+        #sb-footer {
+            border-top: 1px solid var(--border);
+            padding: 16px 20px 20px;
+        }
+
+        .ghost-btn {
+            border-radius: 18px;
+            min-height: 46px;
+        }
+
+        #main {
+            min-width: 0;
+            background: transparent;
+            position: relative;
+        }
+
+        #topbar {
+            min-height: 86px;
+            padding: 20px 20px 12px;
+            border-bottom: none;
+            background: transparent;
+            display: grid;
+            grid-template-columns: 42px minmax(0, 1fr) 42px;
+            align-items: center;
+            gap: 12px;
+        }
+
+        #topbar-model {
+            display: flex;
+            justify-content: center;
+        }
+
+        #topbar .sel {
+            appearance: none;
+            -webkit-appearance: none;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 999px;
+            min-height: 40px;
+            padding: 0 36px 0 18px;
+            text-align: center;
+            font-size: 17px;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+            max-width: 280px;
+            width: 100%;
+            background-image: linear-gradient(45deg, transparent 50%, var(--text) 50%), linear-gradient(135deg, var(--text) 50%, transparent 50%);
+            background-position: calc(100% - 18px) calc(50% - 2px), calc(100% - 12px) calc(50% - 2px);
+            background-size: 6px 6px, 6px 6px;
+            background-repeat: no-repeat;
+        }
+
+        #topbar .sel:focus {
+            border-color: rgba(255, 255, 255, 0.14);
+        }
+
+        #sb-btn,
+        #cfg-btn {
+            width: 42px;
+            height: 42px;
+            border: 0;
+            background: transparent;
+            color: var(--text);
+            border-radius: 50%;
+            display: grid;
+            place-items: center;
+            padding: 0;
+            margin: 0;
+        }
+
+        body.sb-collapsed #sb-btn {
+            display: grid;
+        }
+
+        .history-nav-icon {
+            width: 24px;
+            height: 24px;
+            position: relative;
+            display: block;
+        }
+
+        .history-nav-icon::before {
+            content: "";
+            position: absolute;
+            inset: 4px;
+            border: 3px solid currentColor;
+            border-radius: 50%;
+        }
+
+        .history-nav-icon::after {
+            content: "";
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            border-top: 3px solid currentColor;
+            border-left: 3px solid currentColor;
+            transform: rotate(-45deg);
+            left: 0;
+            top: 0;
+        }
+
+        .settings-nav-icon {
+            width: 22px;
+            height: 22px;
+            position: relative;
+            display: block;
+        }
+
+        .settings-nav-icon::before,
+        .settings-nav-icon::after,
+        .settings-nav-icon span {
+            content: "";
+            position: absolute;
+            left: 0;
+            right: 0;
+            height: 2.5px;
+            background: currentColor;
+            border-radius: 999px;
+        }
+
+        .settings-nav-icon::before { top: 4px; }
+        .settings-nav-icon span { top: 10px; }
+        .settings-nav-icon::after { top: 16px; }
+
+        .settings-nav-icon i,
+        .settings-nav-icon b,
+        .settings-nav-icon em {
+            position: absolute;
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+
+        .settings-nav-icon i { top: 1px; left: 12px; }
+        .settings-nav-icon b { top: 7px; left: 4px; }
+        .settings-nav-icon em { top: 13px; left: 15px; }
+
+        #cfg {
+            position: fixed;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            width: min(380px, 100vw);
+            max-width: 100vw;
+            transform: translateX(104%);
+            opacity: 0;
+            pointer-events: none;
+            transition: transform .25s ease, opacity .2s ease;
+            border-left: 1px solid var(--border);
+            border-radius: 0;
+            background: rgba(12, 12, 12, 0.98);
+            z-index: 120;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #cfg.on {
+            transform: translateX(0);
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        #cfg-head {
+            padding: 22px 20px 12px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 14px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        #cfg-head span {
+            color: var(--text);
+            font-size: 22px;
+            font-weight: 800;
+            letter-spacing: -0.03em;
+            text-transform: none;
+        }
+
+        #cfg-close {
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            display: grid;
+            place-items: center;
+            padding: 0;
+        }
+
+        #cfg-body {
+            flex: 1;
+            overflow: auto;
+            padding: 18px 20px 28px;
+            display: grid;
+            gap: 14px;
+            align-content: start;
+        }
+
+        .cfg-account-card {
+            padding: 16px 18px;
+            border-radius: 24px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            display: grid;
+            gap: 12px;
+        }
+
+        .cfg-account-top {
+            display: grid;
+            gap: 4px;
+        }
+
+        .cfg-account-top strong {
+            font-size: 15px;
+        }
+
+        .cfg-account-top span {
+            color: var(--muted);
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        #cfg-account-slot #account-shell {
+            margin-left: 0;
+            padding-left: 0;
+            width: 100%;
+            flex-direction: column;
+            align-items: stretch;
+        }
+
+        #cfg-account-slot #account-pill,
+        #cfg-account-slot #account-logout {
+            width: 100%;
+            justify-content: space-between;
+        }
+
+        .cfg-quick-actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        #plugin-btn,
+        #theme-btn {
+            width: 100%;
+            margin: 0;
+            min-height: 44px;
+            border-radius: 16px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            color: var(--text);
+            font-size: 13px;
+            padding: 0 14px;
+        }
+
+        #plugin-btn:hover,
+        #plugin-btn.on,
+        #theme-btn:hover {
+            border-color: rgba(255, 255, 255, 0.12);
+            color: var(--text);
+        }
+
+        #api-in {
+            width: 100%;
+            min-height: 46px;
+        }
+
+        #chat {
+            padding: 0 20px 0;
+            background: transparent;
+        }
+
+        #empty {
+            min-height: calc(100vh - 230px);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            gap: 12px;
+        }
+
+        #empty .logo,
+        #empty h3,
+        #empty p,
+        .empty-features {
+            display: none;
+        }
+
+        .m {
+            max-width: min(820px, 86%);
+            border-radius: 24px;
+            padding: 16px 18px;
+            background: rgba(255, 255, 255, 0.045);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .m.user {
+            background: rgba(255, 255, 255, 0.08);
+        }
+
+        #ibar-container {
+            padding: 0 20px 20px;
+            background: transparent;
+        }
+
+        #ibar-wrap {
+            max-width: none;
+        }
+
+        #ibar {
+            min-height: 82px;
+            padding: 10px 10px 10px 12px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.055);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            gap: 10px;
+            box-shadow: none;
+        }
+
+        #attach-btn,
+        #mic-btn,
+        #live-btn {
+            min-width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            background: transparent;
+            border: 0;
+            color: var(--muted);
+            padding: 0;
+        }
+
+        #live-btn {
+            border-radius: 999px;
+            min-width: 64px;
+            padding: 0 12px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        #msg {
+            min-height: 58px;
+            padding: 16px 0;
+            font-size: 18px;
+            color: var(--text);
+        }
+
+        #send-btn {
+            width: 42px;
+            min-width: 42px;
+            height: 62px;
+            border-radius: 18px;
+            background: linear-gradient(180deg, var(--accent2), var(--accent));
+            color: #fff;
+        }
+
+        #stop-btn {
+            display: none !important;
+        }
+
+        #plugin-panel {
+            position: fixed;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            width: min(460px, 100vw);
+            transform: translateX(104%);
+            transition: transform .25s ease;
+            border-left: 1px solid var(--border);
+            border-radius: 0;
+            background: rgba(10, 10, 10, 0.98);
+            z-index: 130;
+        }
+
+        #plugin-panel.on {
+            transform: translateX(0);
+        }
+
+        @media (max-width: 1024px) {
+            #wrapper {
+                display: block;
+            }
+
+            #sidebar {
+                position: fixed;
+                top: 0;
+                left: 0;
+                bottom: 0;
+                width: min(100vw, 420px);
+                transform: translateX(-104%);
+                z-index: 110;
+            }
+
+            #sidebar.open {
+                transform: translateX(0);
+            }
+
+            #sidebar.collapsed {
+                width: min(100vw, 420px) !important;
+                min-width: min(100vw, 420px) !important;
+                overflow: auto !important;
+            }
+
+            #cfg {
+                width: 100vw;
+            }
+        }
     </style>
 </head>
 
@@ -2181,7 +2734,7 @@
         </div>
     </div>
 
-    <div id="overlay" onclick="closeSidebar()"></div>
+    <div id="overlay" onclick="closeSidebar(); if(document.getElementById('cfg').classList.contains('on')) toggleCfg();"></div>
     <div id="mic-status">🎙 Ouvindo… (clique para parar)</div>
     <div id="live-hud">
         <div id="live-hud-dot"></div>
@@ -2202,10 +2755,11 @@
         <!-- SIDEBAR -->
         <aside id="sidebar">
             <div id="sb-head">
-                <span style="font-size:20px">✦</span>
-                <h2>SkillFlow Chat OS</h2>
+                <button id="sb-back" onclick="window.innerWidth<=1024?closeSidebar():toggleSidebarDesktop()"
+                    title="Voltar">←</button>
+                <h2>History</h2>
                 <button id="sb-close" onclick="window.innerWidth<=768?closeSidebar():toggleSidebarDesktop()"
-                    title="Recolher sidebar">◀</button>
+                    title="Recolher sidebar">⋮</button>
             </div>
 
             <div id="sb-actions">
@@ -2233,10 +2787,11 @@
 
             <!-- TOPBAR -->
             <div id="topbar">
-                <button id="sb-btn" onclick="openSidebar()">☰</button>
+                <button id="sb-btn" onclick="openSidebar()" aria-label="Abrir histórico">
+                    <span class="history-nav-icon"></span>
+                </button>
 
-                <div class="tb-grp">
-                    <label>Modelo LLM</label>
+                <div id="topbar-model">
                     <select id="model-sel" class="sel" onchange="onModelChange()">
                         <optgroup label="Gemini 2.5 Stable">
                             <option value="gemini-2.5-pro" selected>Gemini 2.5 Pro</option>
@@ -2262,23 +2817,33 @@
                     </select>
                 </div>
 
-                <div class="tb-grp">
-                    <label>API Key</label>
-                    <input type="password" id="api-in" class="inp" placeholder="AIzaSy…" oninput="save()" />
-                </div>
-
-                <button id="cfg-btn" onclick="toggleCfg()">⚙ Config</button>
-                <button id="plugin-btn" onclick="togglePlugins()" title="Skills e plugins">🔌 Skills</button>
-                <button id="theme-btn" onclick="toggleTheme()" title="Alternar Tema">🌙</button>
+                <button id="cfg-btn" onclick="toggleCfg()" aria-label="Abrir configurações">
+                    <span class="settings-nav-icon"><span></span><i></i><b></b><em></em></span>
+                </button>
             </div>
 
             <!-- SETTINGS -->
             <div id="cfg">
                 <div id="cfg-head">
-                    <span>Configuração do modelo, voz e comportamento</span>
+                    <span>Configuração geral</span>
                     <button id="cfg-close" onclick="toggleCfg()" title="Fechar">✕</button>
                 </div>
                 <div id="cfg-body">
+                    <div class="cfg-account-card">
+                        <div class="cfg-account-top">
+                            <strong>Conta e sessão</strong>
+                            <span>Config, conta, skills e tema ficam aqui.</span>
+                        </div>
+                        <div id="cfg-account-slot"></div>
+                    </div>
+                    <div class="cfg-quick-actions">
+                        <button id="plugin-btn" onclick="togglePlugins()" title="Skills e plugins">Skills</button>
+                        <button id="theme-btn" onclick="toggleTheme()" title="Alternar Tema">Tema</button>
+                    </div>
+                    <div class="sg sg-wide">
+                        <label>API Key</label>
+                        <input type="password" id="api-in" class="inp" placeholder="AIzaSy…" oninput="save()" />
+                    </div>
                     <div class="sg" style="min-width:160px">
                         <label>Temperature <b id="tv">1.0</b></label>
                         <input type="range" id="temp" min="0" max="2" step="0.05" value="1.0"
@@ -3274,9 +3839,11 @@ return {
             function toggleCfg() {
                 const p = document.getElementById('cfg');
                 const b = document.getElementById('cfg-btn');
+                const overlay = document.getElementById('overlay');
                 const open = p.classList.toggle('on');
                 b.classList.toggle('on', open);
                 if (open) applyThinkVisibility();
+                if (window.innerWidth <= 1024) overlay.classList.toggle('show', open);
             }
 
             function applyThinkVisibility() {
