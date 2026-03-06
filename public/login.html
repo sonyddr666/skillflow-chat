@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SkillFlow Login</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+    <style>
+        :root { color-scheme: dark; --bg: #090909; --surface: rgba(18,18,18,.9); --surface2: rgba(255,255,255,.04); --border: rgba(255,255,255,.08); --text: #fff; --muted: #a7a7a7; --accent: #ffb3c1; --accent2: #a8d5ff; --danger: #ff7d7d; --ok: #8ce0a1; }
+        * { box-sizing: border-box; }
+        body { margin: 0; min-height: 100vh; font-family: Inter, sans-serif; color: var(--text); background: radial-gradient(circle at top left, rgba(255,179,193,.16), transparent 28%), radial-gradient(circle at top right, rgba(168,213,255,.14), transparent 25%), #050505; display: grid; place-items: center; padding: 24px; }
+        .noise { position: fixed; inset: 0; pointer-events: none; opacity: .04; background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.88' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
+        .shell { position: relative; z-index: 1; width: min(1080px, 100%); display: grid; grid-template-columns: 1.1fr .9fr; gap: 20px; }
+        .hero, .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 24px; backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); box-shadow: 0 24px 80px rgba(0,0,0,.32); }
+        .hero { padding: 32px; display: flex; flex-direction: column; justify-content: space-between; min-height: 620px; }
+        .eyebrow { display: inline-flex; gap: 8px; font-size: 12px; letter-spacing: .16em; text-transform: uppercase; color: var(--accent2); }
+        h1 { margin: 18px 0 14px; font-family: "Space Grotesk", sans-serif; font-size: clamp(32px, 5vw, 58px); line-height: .95; }
+        .lead { color: var(--muted); font-size: 16px; max-width: 520px; line-height: 1.6; }
+        .grid { margin-top: 24px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+        .card { padding: 14px; border-radius: 16px; background: var(--surface2); border: 1px solid var(--border); }
+        .card strong { display: block; margin-bottom: 6px; font-size: 13px; }
+        .card span { color: var(--muted); font-size: 13px; line-height: 1.5; }
+        .hero-footer { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 28px; }
+        .hero-footer span { display: inline-flex; align-items: center; gap: 6px; padding: 10px 12px; border-radius: 999px; font-size: 12px; color: var(--muted); background: rgba(255,255,255,.04); border: 1px solid var(--border); }
+        .panel { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+        .tabs { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; background: rgba(255,255,255,.03); border: 1px solid var(--border); border-radius: 14px; padding: 6px; }
+        .tab { border: 0; border-radius: 10px; padding: 12px 14px; font-weight: 600; color: var(--muted); background: transparent; cursor: pointer; }
+        .tab.active { color: var(--text); background: linear-gradient(135deg, rgba(255,179,193,.28), rgba(168,213,255,.24)); }
+        form { display: none; flex-direction: column; gap: 14px; }
+        form.active { display: flex; }
+        .title { font-family: "Space Grotesk", sans-serif; font-size: 28px; margin: 6px 0 0; }
+        .sub { color: var(--muted); font-size: 14px; line-height: 1.5; margin: 0 0 8px; }
+        label { display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: var(--muted); }
+        input { width: 100%; border: 1px solid var(--border); border-radius: 14px; background: rgba(255,255,255,.04); color: var(--text); padding: 14px 16px; font: inherit; outline: none; }
+        input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(255,179,193,.08); }
+        .hint { color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: -4px; }
+        .submit { border: 0; border-radius: 16px; padding: 14px 18px; font: inherit; font-weight: 700; color: #111; background: linear-gradient(135deg, var(--accent), var(--accent2)); cursor: pointer; }
+        .submit[disabled] { cursor: wait; opacity: .72; }
+        .status { min-height: 22px; font-size: 13px; }
+        .status.error { color: var(--danger); }
+        .status.success { color: var(--ok); }
+        @media (max-width: 920px) { .shell { grid-template-columns: 1fr; } .hero { min-height: auto; } }
+    </style>
+</head>
+<body>
+    <div class="noise"></div>
+    <main class="shell">
+        <section class="hero">
+            <div>
+                <span class="eyebrow">SkillFlow Chat OS</span>
+                <h1>Entre antes do chat para salvar seu estado, skills e workspace.</h1>
+                <p class="lead">Cada conta passa a ter conversas, configurações, skills customizadas e arquivos próprios no servidor, sem mudar o fluxo principal da página.</p>
+                <div class="grid">
+                    <article class="card"><strong>Memória por usuário</strong><span>Configurações, conversas e preferências ficam isoladas por login.</span></article>
+                    <article class="card"><strong>Skills persistentes</strong><span>As skills criadas no editor continuam indo para o backend e ficam separadas por conta.</span></article>
+                    <article class="card"><strong>Workspace dedicado</strong><span>Os arquivos criados por tools de filesystem agora vivem dentro da área do usuário.</span></article>
+                    <article class="card"><strong>Mesmo chat</strong><span>Depois do login, a página principal continua funcionando do mesmo jeito que já estava.</span></article>
+                </div>
+            </div>
+            <div class="hero-footer">
+                <span>Login local por cookie</span>
+                <span>Estado salvo em disco</span>
+                <span>Tools server-side preservados</span>
+            </div>
+        </section>
+
+        <section class="panel">
+            <div class="tabs">
+                <button class="tab active" type="button" data-mode="login">Entrar</button>
+                <button class="tab" type="button" data-mode="register">Criar conta</button>
+            </div>
+
+            <form id="login-form" class="active">
+                <h2 class="title">Entrar</h2>
+                <p class="sub">Use seu login local para abrir o chat e carregar seu estado salvo.</p>
+                <label>Login<input name="login" autocomplete="username" required></label>
+                <label>Senha<input name="password" type="password" autocomplete="current-password" required></label>
+                <button class="submit" type="submit">Abrir chat</button>
+                <div id="login-status" class="status"></div>
+            </form>
+
+            <form id="register-form">
+                <h2 class="title">Criar conta</h2>
+                <p class="sub">Uma conta nova já começa com uma área vazia, pronta para conversas, skills e arquivos.</p>
+                <label>Login<input name="login" autocomplete="username" minlength="3" required></label>
+                <label>Senha<input name="password" type="password" autocomplete="new-password" minlength="4" required></label>
+                <p class="hint">Mínimo: 3 caracteres no login e 4 na senha.</p>
+                <button class="submit" type="submit">Criar conta e entrar</button>
+                <div id="register-status" class="status"></div>
+            </form>
+        </section>
+    </main>
+
+    <script>
+        (async function () {
+            try {
+                const res = await fetch('/auth/me', { cache: 'no-store' });
+                if (res.ok) location.replace('/');
+            } catch (_) { }
+        })();
+
+        const tabs = [...document.querySelectorAll('.tab')];
+        const forms = {
+            login: document.getElementById('login-form'),
+            register: document.getElementById('register-form')
+        };
+
+        function setMode(mode) {
+            tabs.forEach((tab) => tab.classList.toggle('active', tab.dataset.mode === mode));
+            Object.entries(forms).forEach(([key, form]) => form.classList.toggle('active', key === mode));
+        }
+
+        tabs.forEach((tab) => tab.addEventListener('click', () => setMode(tab.dataset.mode)));
+
+        async function submitAuth(formId, endpoint, statusId) {
+            const form = document.getElementById(formId);
+            const status = document.getElementById(statusId);
+            const submit = form.querySelector('button[type="submit"]');
+            status.className = 'status';
+            status.textContent = '';
+            submit.disabled = true;
+            try {
+                const payload = Object.fromEntries(new FormData(form).entries());
+                const res = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+                status.classList.add('success');
+                status.textContent = 'Conta liberada. Redirecionando...';
+                location.replace('/');
+            } catch (error) {
+                status.classList.add('error');
+                status.textContent = error.message || 'Falha ao autenticar.';
+            } finally {
+                submit.disabled = false;
+            }
+        }
+
+        document.getElementById('login-form').addEventListener('submit', (event) => {
+            event.preventDefault();
+            submitAuth('login-form', '/auth/login', 'login-status');
+        });
+
+        document.getElementById('register-form').addEventListener('submit', (event) => {
+            event.preventDefault();
+            submitAuth('register-form', '/auth/register', 'register-status');
+        });
+    </script>
+</body>
+</html>

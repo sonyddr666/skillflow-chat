@@ -1,0 +1,13 @@
+{
+  "gc_cfg": {
+    "model": "gemini-2.5-flash-lite"
+  },
+  "gc_theme": "dark",
+  "gc_convs": {
+    "c1": {
+      "title": "Teste",
+      "msgs": [],
+      "ts": 1
+    }
+  }
+}

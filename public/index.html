@@ -20,6 +20,7 @@
         href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css" id="hljs-theme">
     <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="./account.js"></script>
 
     <style>
         :root[data-theme="dark"] {
@@ -3289,8 +3290,8 @@ return {
             }
 
             // ─ PERSIST ─
-            let convs = JSON.parse(localStorage.getItem('gc_convs') || '{}');
-            let activeId = null;
+            var convs = JSON.parse(localStorage.getItem('gc_convs') || '{}');
+            var activeId = null;
             let ctrl = null;
             let pendingImages = [];
 
@@ -3908,16 +3909,38 @@ return {
             });
 
             // ─ INIT ─
-            loadCfg();
-            loadPlugins();
-            initMermaid();
-            renderSidebar();
-            renderChat();
-            // Restore sidebar collapsed state on desktop
-            if (window.innerWidth > 768 && localStorage.getItem('gc_sb_collapsed') === '1') {
-                document.getElementById('sidebar').classList.add('collapsed');
-                document.body.classList.add('sb-collapsed');
+            async function initApp() {
+                try {
+                    if (window.__ACCOUNT_BOOTSTRAP__) {
+                        const authState = await window.__ACCOUNT_BOOTSTRAP__;
+                        if (authState?.redirected) return;
+                    }
+                } catch (error) {
+                    console.warn('Falha ao carregar conta:', error?.message || error);
+                }
+
+                convs = JSON.parse(localStorage.getItem('gc_convs') || '{}');
+                if (!activeId || !convs[activeId]) {
+                    activeId = Object.keys(convs)
+                        .sort((a, b) => (convs[b]?.ts || 0) - (convs[a]?.ts || 0))[0] || null;
+                }
+
+                loadCfg();
+                await loadPlugins();
+                initMermaid();
+                renderSidebar();
+                renderChat();
+                // Restore sidebar collapsed state on desktop
+                if (window.innerWidth > 768 && localStorage.getItem('gc_sb_collapsed') === '1') {
+                    document.getElementById('sidebar').classList.add('collapsed');
+                    document.body.classList.add('sb-collapsed');
+                }
+
+                window.__skillflowAccount?.mountShell?.();
+                window.__skillflowAccount?.startSync?.();
             }
+
+            initApp();
 
             // ─══════════════════════════════════════════════════
             // SPEECH TO TEXT — Web Speech API (PT-BR, tempo real)
