@@ -2641,6 +2641,120 @@
                     }
                 },
                 {
+                    id: 'sv_fs_list', builtin: false, enabled: true, icon: '📁', name: 'server_list_files',
+                    description: 'Lista arquivos e pastas da workspace do servidor via backend local. Prefira esta tool para navegar arquivos do deploy em vez de assumir acesso direto do browser ao filesystem.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            path: { type: 'STRING', description: 'Caminho relativo dentro da workspace. Ex: "", docs, src/components' }
+                        }
+                    },
+                    action: {
+                        type: 'http',
+                        method: 'GET',
+                        url: '/api/fs/list?path={{path}}'
+                    }
+                },
+                {
+                    id: 'sv_fs_read', builtin: false, enabled: true, icon: '📄', name: 'server_read_file',
+                    description: 'Lê um arquivo de texto da workspace do servidor via backend local. Use para abrir, inspecionar e reutilizar arquivos existentes no deploy.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            path: { type: 'STRING', description: 'Caminho relativo do arquivo. Ex: notes/todo.md' }
+                        },
+                        required: ['path']
+                    },
+                    action: {
+                        type: 'http',
+                        method: 'GET',
+                        url: '/api/fs/read?path={{path}}'
+                    }
+                },
+                {
+                    id: 'sv_fs_write', builtin: false, enabled: true, icon: '📝', name: 'server_write_file',
+                    description: 'Cria ou edita um arquivo de texto na workspace do servidor via backend local. Use para persistir conteúdo real no deploy sem depender de localStorage.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            path: { type: 'STRING', description: 'Caminho relativo do arquivo a criar ou editar' },
+                            content: { type: 'STRING', description: 'Conteúdo completo a salvar no arquivo' },
+                            create_dirs: { type: 'BOOLEAN', description: 'Cria pastas pai automaticamente quando necessário' }
+                        },
+                        required: ['path', 'content']
+                    },
+                    action: {
+                        type: 'http',
+                        method: 'POST',
+                        url: '/api/fs/write',
+                        headers: { 'Content-Type': 'application/json' },
+                        defaults: { create_dirs: true },
+                        body: {
+                            path: '{{path}}',
+                            content: '{{content}}',
+                            create_dirs: '{{create_dirs}}'
+                        }
+                    }
+                },
+                {
+                    id: 'sv_fs_mkdir', builtin: false, enabled: true, icon: '📂', name: 'server_make_directory',
+                    description: 'Cria uma pasta na workspace do servidor via backend local. Use antes de escrever arquivos em novas áreas da workspace.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            path: { type: 'STRING', description: 'Caminho relativo da pasta. Ex: docs/releases' }
+                        },
+                        required: ['path']
+                    },
+                    action: {
+                        type: 'http',
+                        method: 'POST',
+                        url: '/api/fs/mkdir',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: {
+                            path: '{{path}}'
+                        }
+                    }
+                },
+                {
+                    id: 'sv_fs_rename', builtin: false, enabled: true, icon: '✏️', name: 'server_rename_path',
+                    description: 'Renomeia ou move um arquivo/pasta dentro da workspace do servidor via backend local.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            path: { type: 'STRING', description: 'Caminho atual' },
+                            next_path: { type: 'STRING', description: 'Novo caminho relativo' }
+                        },
+                        required: ['path', 'next_path']
+                    },
+                    action: {
+                        type: 'http',
+                        method: 'POST',
+                        url: '/api/fs/rename',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: {
+                            path: '{{path}}',
+                            next_path: '{{next_path}}'
+                        }
+                    }
+                },
+                {
+                    id: 'sv_fs_delete', builtin: false, enabled: true, icon: '🗑️', name: 'server_delete_path',
+                    description: 'Apaga um arquivo ou pasta da workspace do servidor via backend local. Use com cuidado para exclusões reais no deploy.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            path: { type: 'STRING', description: 'Caminho relativo do arquivo ou pasta a apagar' }
+                        },
+                        required: ['path']
+                    },
+                    action: {
+                        type: 'http',
+                        method: 'DELETE',
+                        url: '/api/fs/delete?path={{path}}'
+                    }
+                },
+                {
                     id: 'wf_context', builtin: false, enabled: true, icon: '🗂️', name: 'get_workspace_context',
                     description: 'Retorna o contexto atual do chat: conversa ativa, modelo, prompt de sistema, TTS e resumo das skills habilitadas.',
                     parameters: { type: 'OBJECT', properties: {} },
@@ -2740,17 +2854,84 @@ return {
             ];
 
             let plugins = [];
+            let customPluginIds = new Set();
 
-            function loadPlugins() {
-                const stored = JSON.parse(localStorage.getItem('gc_plugins') || 'null');
-                if (!stored) { plugins = DEFAULT_PLUGINS.map(p => ({ ...p })); }
-                else {
-                    const storedIds = new Set(stored.map(p => p.id));
-                    plugins = [...stored, ...DEFAULT_PLUGINS.filter(p => !storedIds.has(p.id))];
-                }
-                savePlugins(); renderPluginList();
+            function clonePlugin(p) {
+                return JSON.parse(JSON.stringify(p));
             }
-            function savePlugins() { localStorage.setItem('gc_plugins', JSON.stringify(plugins)); }
+
+            function mergePlugins(defaults, customs, stored) {
+                const storedList = Array.isArray(stored) ? stored : [];
+                const storedById = new Map(storedList.map(p => [p.id, p]));
+                const mergedDefaults = defaults.map(p => {
+                    const saved = storedById.get(p.id) || {};
+                    return { ...clonePlugin(p), enabled: saved.enabled ?? p.enabled };
+                });
+                const defaultIds = new Set(mergedDefaults.map(p => p.id));
+                const normalizedCustoms = (Array.isArray(customs) ? customs : [])
+                    .filter(p => p && !defaultIds.has(p.id))
+                    .map(p => {
+                        const saved = storedById.get(p.id) || {};
+                        return { ...clonePlugin(p), enabled: saved.enabled ?? (p.enabled !== false) };
+                    });
+                customPluginIds = new Set(normalizedCustoms.map(p => p.id));
+                return [...mergedDefaults, ...normalizedCustoms];
+            }
+
+            async function fetchCustomPlugins() {
+                const res = await fetch('/api/skills');
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                return Array.isArray(data.skills) ? data.skills : [];
+            }
+
+            async function persistCustomPlugin(plugin) {
+                const res = await fetch('/api/skills', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(plugin)
+                });
+                if (!res.ok) {
+                    let msg = 'HTTP ' + res.status;
+                    try { const err = await res.json(); msg = err.error || msg; } catch (_) { }
+                    throw new Error(msg);
+                }
+                const data = await res.json();
+                customPluginIds.add(data.skill?.id || plugin.id);
+                return data.skill || plugin;
+            }
+
+            async function deleteCustomPluginOnServer(id) {
+                const res = await fetch('/api/skills/' + encodeURIComponent(id), { method: 'DELETE' });
+                if (!res.ok) {
+                    let msg = 'HTTP ' + res.status;
+                    try { const err = await res.json(); msg = err.error || msg; } catch (_) { }
+                    throw new Error(msg);
+                }
+                customPluginIds.delete(id);
+            }
+
+            async function loadPlugins() {
+                const stored = JSON.parse(localStorage.getItem('gc_plugins') || 'null');
+                try {
+                    const customs = await fetchCustomPlugins();
+                    plugins = mergePlugins(DEFAULT_PLUGINS, customs, stored);
+                } catch (e) {
+                    console.warn('Falha ao carregar skills do servidor:', e.message);
+                    if (!stored) plugins = DEFAULT_PLUGINS.map(p => ({ ...p }));
+                    else {
+                        const storedIds = new Set(stored.map(p => p.id));
+                        plugins = [...stored, ...DEFAULT_PLUGINS.filter(p => !storedIds.has(p.id))];
+                    }
+                    customPluginIds = new Set(plugins.filter(p => !p.builtin).map(p => p.id));
+                }
+                savePlugins(false);
+                renderPluginList();
+            }
+
+            function savePlugins(syncServer = true) {
+                localStorage.setItem('gc_plugins', JSON.stringify(plugins));
+            }
 
             function buildTools() {
                 const enabled = plugins.filter(p => p.enabled);
@@ -2900,7 +3081,13 @@ return {
 
             function togglePlugin(id, enabled) {
                 const p = plugins.find(x => x.id === id);
-                if (p) { p.enabled = enabled; savePlugins(); }
+                if (p) {
+                    p.enabled = enabled;
+                    savePlugins(false);
+                    if (!p.builtin && customPluginIds.has(id)) {
+                        persistCustomPlugin(p).catch(e => toast('❌ Skill: ' + e.message.slice(0, 60)));
+                    }
+                }
             }
 
             function selectPlugin(id) {
@@ -2959,7 +3146,7 @@ return {
                 if (codeWrap) codeWrap.style.display = t === 'code' ? 'block' : 'none';
             }
 
-            function savePluginEdit(id) {
+            async function savePluginEdit(id) {
                 const p = plugins.find(x => x.id === id); if (!p) return;
                 const ne = document.getElementById('pe-name');
                 const de = document.getElementById('pe-desc');
@@ -2970,6 +3157,10 @@ return {
                 if (!p.builtin && ne) p.name = ne.value.trim().replace(/\s+/g, '_');
                 if (de) p.description = de.value.trim();
                 if (pe) { try { p.parameters = JSON.parse(pe.value); } catch (e) { toast('❌ Parâmetros JSON inválido: ' + e.message); return; } }
+                if (!p.builtin && plugins.some(x => x.id !== p.id && x.name === p.name)) {
+                    toast('❌ Já existe uma skill com esse nome.');
+                    return;
+                }
                 const actionType = at?.value || 'code';
                 if (actionType === 'http') {
                     if (ae) { try { p.action = JSON.parse(ae.value); } catch (e) { toast('❌ Action JSON inválido: ' + e.message); return; } }
@@ -2978,7 +3169,19 @@ return {
                     if (!p.builtin && ce) p.code = ce.value;
                     delete p.action;
                 }
-                savePlugins(); renderPluginList(); toast('✓ Plugin salvo!');
+                savePlugins(false);
+                if (!p.builtin) {
+                    try {
+                        const saved = await persistCustomPlugin(p);
+                        Object.assign(p, saved);
+                    } catch (e) {
+                        toast('❌ Skill: ' + e.message);
+                        return;
+                    }
+                }
+                renderPluginList();
+                selectPlugin(id);
+                toast('✓ Plugin salvo!');
             }
 
             function testPlugin(id) {
@@ -2992,12 +3195,17 @@ return {
                 if (out) { out.style.display = 'block'; out.textContent = JSON.stringify(result, null, 2); }
             }
 
-            function deletePlugin(id) {
+            async function deletePlugin(id) {
                 if (!confirm('Deletar este plugin?')) return;
+                const target = plugins.find(x => x.id === id);
                 plugins = plugins.filter(x => x.id !== id);
                 activePluginId = null; savePlugins(); renderPluginList();
                 const ed = document.getElementById('plugin-editor');
                 ed.classList.add('empty'); ed.innerHTML = '← Selecione ou crie uma skill';
+                if (target && !target.builtin && customPluginIds.has(id)) {
+                    try { await deleteCustomPluginOnServer(id); }
+                    catch (e) { toast('❌ Skill: ' + e.message); }
+                }
                 toast('🗑 Skill deletada.');
             }
 
