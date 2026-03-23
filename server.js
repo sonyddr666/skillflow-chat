@@ -16,6 +16,15 @@ const systemDir = join(workspaceRootDir, ".system");
 const usersFile = join(systemDir, "users.json");
 const userStateDir = join(systemDir, "state");
 const sessions = new Map();
+const TOKEN_URL = "https://auth.openai.com/oauth/token";
+const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
+const OPENAI_OAUTH_CLIENT_ID = process.env.OPENAI_OAUTH_CLIENT_ID || "app_EMoamEEZ73f0CkXaXp7hrann";
+const DEFAULT_CODEX_MODEL = "gpt-5.4-mini";
+const DEFAULT_CODEX_REASONING = "medium";
+const DEFAULT_CODEX_HISTORY_LIMIT = 40;
+const DEFAULT_CODEX_INSTRUCTIONS = process.env.SKILLFLOW_CODEX_DEFAULT_INSTRUCTIONS
+  || "Responda em portugues do Brasil e mantenha continuidade com base na conversa.";
+const CODEX_FAKE_RESPONSES = false;
 
 const STATE_KEYS = [
   "gc_cfg",
@@ -309,6 +318,371 @@ async function loadUserState(user) {
 async function saveUserState(user, nextState) {
   await ensureUserDirs(user);
   await writeFile(userStateFile(user), `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+}
+
+function nowMs() {
+  return Date.now();
+}
+
+function clampCodexHistoryLimit(value) {
+  const parsed = Number.parseInt(String(value ?? DEFAULT_CODEX_HISTORY_LIMIT), 10);
+  if (Number.isNaN(parsed)) return DEFAULT_CODEX_HISTORY_LIMIT;
+  return Math.max(2, Math.min(200, parsed));
+}
+
+function decodeBase64Url(value) {
+  const normalized = String(value || "")
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
+  const pad = normalized.length % 4;
+  const padded = pad ? normalized + "=".repeat(4 - pad) : normalized;
+  return Buffer.from(padded, "base64").toString("utf8");
+}
+
+function decodeJwtPayload(token) {
+  const parts = String(token || "").split(".");
+  if (parts.length < 2) return null;
+  try {
+    return JSON.parse(decodeBase64Url(parts[1]));
+  } catch {
+    return null;
+  }
+}
+
+function extractCodexAccountId(token) {
+  const payload = decodeJwtPayload(token);
+  if (!payload || typeof payload !== "object") return null;
+  const auth = payload["https://api.openai.com/auth"];
+  if (!auth || typeof auth !== "object") return null;
+  return auth.chatgpt_account_id || null;
+}
+
+function normalizeCodexAuth(input) {
+  let auth = input;
+  if (typeof auth === "string") {
+    const trimmed = auth.trim();
+    if (!trimmed) throw new Error("auth invalido: vazio.");
+    auth = trimmed.startsWith("{") ? JSON.parse(trimmed) : { access: trimmed };
+  }
+
+  if (!auth || typeof auth !== "object" || Array.isArray(auth)) {
+    throw new Error("auth invalido: esperado objeto JSON.");
+  }
+
+  const access = auth.access || auth.access_token;
+  const refresh = auth.refresh || auth.refresh_token || null;
+  let expires = auth.expires ?? auth.expires_at ?? null;
+
+  if (expires !== null && expires !== undefined && expires !== "") {
+    const parsed = Number.parseInt(String(expires), 10);
+    if (Number.isNaN(parsed)) {
+      expires = null;
+    } else {
+      expires = parsed < 1_000_000_000_000 ? parsed * 1000 : parsed;
+    }
+  } else {
+    expires = null;
+  }
+
+  if (!access) {
+    throw new Error("auth invalido: access/access_token ausente.");
+  }
+
+  return {
+    access,
+    refresh,
+    expires,
+    accountId: auth.accountId || extractCodexAccountId(access)
+  };
+}
+
+async function refreshCodexAuth(auth) {
+  if (!auth.refresh) return auth;
+
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: auth.refresh,
+    client_id: OPENAI_OAUTH_CLIENT_ID
+  });
+
+  const response = await fetch(TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString()
+  });
+
+  const raw = await response.text();
+  if (!response.ok) {
+    throw new Error(raw || `refresh falhou: HTTP ${response.status}`);
+  }
+
+  const payload = raw ? JSON.parse(raw) : {};
+  return {
+    access: payload.access_token,
+    refresh: payload.refresh_token || auth.refresh,
+    expires: nowMs() + Number(payload.expires_in || 0) * 1000,
+    accountId: auth.accountId || extractCodexAccountId(payload.access_token)
+  };
+}
+
+async function getValidCodexAuth(input) {
+  const auth = normalizeCodexAuth(input);
+  if (auth.refresh && auth.expires && auth.expires <= nowMs() + 300000) {
+    return refreshCodexAuth(auth);
+  }
+  return auth;
+}
+
+function collectSseChunks(value, keyName, chunks) {
+  if (Array.isArray(value)) {
+    for (const item of value) collectSseChunks(item, keyName, chunks);
+    return;
+  }
+
+  if (!value || typeof value !== "object") return;
+
+  for (const nested of Object.values(value)) {
+    collectSseChunks(nested, keyName, chunks);
+  }
+
+  if (typeof value[keyName] === "string") {
+    chunks.push(value[keyName]);
+  }
+}
+
+function extractCodexResponseOutputText(responseObj) {
+  const chunks = [];
+  if (!responseObj || typeof responseObj !== "object") return chunks;
+  const output = Array.isArray(responseObj.output) ? responseObj.output : [];
+  for (const item of output) {
+    if (!item || typeof item !== "object") continue;
+    const content = Array.isArray(item.content) ? item.content : [];
+    for (const part of content) {
+      if (part && typeof part.text === "string") chunks.push(part.text);
+    }
+  }
+  return chunks;
+}
+
+function parseCodexSsePayload(raw) {
+  const events = [];
+  for (const line of String(raw || "").split(/\r?\n/)) {
+    if (!line.startsWith("data:")) continue;
+    const chunk = line.slice(5).trim();
+    if (!chunk || chunk === "[DONE]") continue;
+    try {
+      events.push(JSON.parse(chunk));
+    } catch {
+      // Ignore malformed SSE chunks.
+    }
+  }
+
+  let responseId = null;
+  const deltaParts = [];
+  let finalTextParts = [];
+
+  for (const event of events) {
+    if (!responseId && event && typeof event === "object") {
+      responseId = event.response_id || event.id || null;
+    }
+
+    const deltas = [];
+    collectSseChunks(event, "delta", deltas);
+    for (const delta of deltas) {
+      if (typeof delta === "string") deltaParts.push(delta);
+    }
+
+    if (event?.type === "response.completed") {
+      finalTextParts = extractCodexResponseOutputText(event.response);
+    }
+  }
+
+  const sourceParts = deltaParts.length ? deltaParts : finalTextParts;
+  const deduped = [];
+  let last = null;
+  for (const part of sourceParts) {
+    if (part !== last) deduped.push(part);
+    last = part;
+  }
+
+  return {
+    id: responseId,
+    output_text: deduped.join("").trim(),
+    events
+  };
+}
+
+function skillflowMsgToCodexText(message) {
+  if (!message || typeof message !== "object") return "";
+
+  const parts = [];
+  if (typeof message.text === "string" && message.text.trim()) {
+    parts.push(message.text.trim());
+  }
+
+  const imageCount = Array.isArray(message.imgs) ? message.imgs.length : 0;
+  const files = Array.isArray(message.files) ? message.files : [];
+  if (imageCount || files.length) {
+    const labels = [];
+    if (imageCount) labels.push(`${imageCount} imagem(ns)`);
+    if (files.length) labels.push(`${files.length} arquivo(s)`);
+    parts.push(`[Anexos na conversa: ${labels.join(" e ")}]`);
+    const fileNames = files.map((file) => file?.name).filter(Boolean);
+    if (fileNames.length) {
+      parts.push(`Arquivos: ${fileNames.join(", ")}`);
+    }
+  }
+
+  return parts.join("\n").trim();
+}
+
+function makeCodexInputMessage(role, text) {
+  return {
+    role,
+    content: [{
+      type: role === "assistant" ? "output_text" : "input_text",
+      text
+    }]
+  };
+}
+
+function buildCodexContextMessages(messages, historyLimit) {
+  const normalized = [];
+  const source = Array.isArray(messages) ? messages : [];
+  for (const message of source) {
+    const role = message?.role === "model" ? "assistant"
+      : message?.role === "user" ? "user"
+        : null;
+    if (!role) continue;
+    const text = skillflowMsgToCodexText(message);
+    if (!text) continue;
+    normalized.push(makeCodexInputMessage(role, text));
+  }
+
+  const limit = clampCodexHistoryLimit(historyLimit);
+  return normalized.length > limit ? normalized.slice(-limit) : normalized;
+}
+
+function buildFakeCodexResponse(messages, userInput, model, sessionId) {
+  const responseId = `fake-${sessionId || "skillflow"}-${nowMs()}`;
+  return {
+    id: responseId,
+    output_text: `[fake:${model}] Conversa ${sessionId || "sem-id"} recebeu ${messages.length} mensagens de contexto. Ultima mensagem: ${userInput}`,
+    events: [{ type: "response.completed", response_id: responseId }]
+  };
+}
+
+async function runCodexChat(payload) {
+  const auth = await getValidCodexAuth(payload.auth);
+  const model = String(payload.model || DEFAULT_CODEX_MODEL);
+  const reasoning = String(payload.reasoning || DEFAULT_CODEX_REASONING);
+  const instructions = String(payload.instructions || DEFAULT_CODEX_INSTRUCTIONS);
+  const contextMessages = buildCodexContextMessages(payload.messages, payload.history_limit);
+  const userInput = contextMessages.at(-1)?.content?.[0]?.text || "";
+
+  if (!userInput) {
+    throw new Error("Nao foi encontrada nenhuma mensagem valida para enviar ao Codex.");
+  }
+
+  if (CODEX_FAKE_RESPONSES) {
+    return {
+      data: buildFakeCodexResponse(contextMessages, userInput, model, payload.session_id),
+      auth
+    };
+  }
+
+  const headers = {
+    Authorization: `Bearer ${auth.access}`,
+    "Content-Type": "application/json",
+    Accept: "text/event-stream"
+  };
+  if (auth.accountId) {
+    headers["chatgpt-account-id"] = auth.accountId;
+  }
+
+  const response = await fetch(CODEX_RESPONSES_URL, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model,
+      input: contextMessages,
+      store: false,
+      stream: true,
+      reasoning: { effort: reasoning },
+      instructions
+    })
+  });
+
+  const raw = await response.text();
+  if (!response.ok) {
+    throw new Error(raw || `Codex falhou com HTTP ${response.status}`);
+  }
+
+  return {
+    data: parseCodexSsePayload(raw),
+    auth
+  };
+}
+
+async function handleChatApi(req, res, user) {
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type"
+    });
+    res.end();
+    return;
+  }
+
+  if (req.method !== "POST") {
+    sendJson(res, 405, { error: "Method not allowed" });
+    return;
+  }
+
+  const raw = await readRequestBody(req);
+  const payload = raw ? JSON.parse(raw) : {};
+  const provider = String(payload.provider || "").trim().toLowerCase();
+
+  if (provider !== "codex") {
+    sendJson(res, 400, { error: "Unsupported provider for backend chat route" });
+    return;
+  }
+
+  if (!payload.auth) {
+    sendJson(res, 400, { error: "auth ausente." });
+    return;
+  }
+
+  if (!payload.model) {
+    sendJson(res, 400, { error: "model ausente." });
+    return;
+  }
+
+  if (!Array.isArray(payload.messages) || !payload.messages.length) {
+    sendJson(res, 400, { error: "messages ausente." });
+    return;
+  }
+
+  const result = await runCodexChat({
+    auth: payload.auth,
+    model: payload.model,
+    reasoning: payload.reasoning || DEFAULT_CODEX_REASONING,
+    history_limit: payload.history_limit ?? DEFAULT_CODEX_HISTORY_LIMIT,
+    instructions: payload.instructions || DEFAULT_CODEX_INSTRUCTIONS,
+    messages: payload.messages,
+    session_id: payload.session_id || `${user.id}-skillflow`
+  });
+
+  sendJson(res, 200, {
+    ok: true,
+    provider: "codex",
+    model: payload.model,
+    reasoning: payload.reasoning || DEFAULT_CODEX_REASONING,
+    context_message_count: buildCodexContextMessages(payload.messages, payload.history_limit).length,
+    auth: result.auth,
+    payload: result.data
+  });
 }
 
 async function handleAuthRoutes(req, res, url) {
@@ -641,7 +1015,13 @@ const server = createServer(async (req, res) => {
   const user = await getAuthenticatedUser(req);
 
   if (url.pathname === "/health") {
-    sendJson(res, 200, { status: "ok", service: "skillflow-node-9321", port: PORT, authenticated: Boolean(user) });
+    sendJson(res, 200, {
+      status: "ok",
+      service: "skillflow-node-9321",
+      port: PORT,
+      authenticated: Boolean(user),
+      codex_fake_responses: CODEX_FAKE_RESPONSES
+    });
     return;
   }
 
@@ -661,6 +1041,10 @@ const server = createServer(async (req, res) => {
     try {
       if (url.pathname === "/api/ghost-search") {
         await handleGhostSearch(req, res, authUser);
+        return;
+      }
+      if (url.pathname === "/api/chat") {
+        await handleChatApi(req, res, authUser);
         return;
       }
       if (url.pathname === "/api/state") {
