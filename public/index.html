@@ -2519,10 +2519,68 @@
             ];
             const CODEX_DEFAULT_REASONING = 'medium';
             const CODEX_DEFAULT_HISTORY_LIMIT = 40;
+            const GEMINI_THINKING_OPTIONS = [
+                { value: '', label: 'auto (padrao)' },
+                { value: 'minimal', label: 'minimal' },
+                { value: 'low', label: 'low' },
+                { value: 'medium', label: 'medium' },
+                { value: 'high', label: 'high' }
+            ];
+            const CODEX_THINKING_OPTIONS = [
+                { value: '', label: 'auto (padrao)' },
+                { value: 'low', label: 'low (baixa)' },
+                { value: 'medium', label: 'medium (media)' },
+                { value: 'high', label: 'high (alta)' },
+                { value: 'xhigh', label: 'xhigh (altissimo)' }
+            ];
+            const CODEX_REASONING_MAP = {
+                '': '',
+                auto: '',
+                default: '',
+                minimal: 'low',
+                low: 'low',
+                baixa: 'low',
+                medium: 'medium',
+                media: 'medium',
+                'média': 'medium',
+                high: 'high',
+                alta: 'high',
+                xhigh: 'xhigh',
+                altissimo: 'xhigh',
+                'altíssimo': 'xhigh'
+            };
             const supportsThinking = m => G3.some(x => String(m || '').startsWith(x.replace('-preview', ''))) || String(m || '').includes('2.5') || String(m || '').includes('2.0-flash-thinking');
 
             function isCodexModel(model) {
                 return CODEX_MODELS.some(item => item.value === String(model || ''));
+            }
+
+            function normalizeCodexReasoning(value, preserveAuto = false) {
+                const raw = String(value || '').trim().toLowerCase();
+                const normalized = Object.prototype.hasOwnProperty.call(CODEX_REASONING_MAP, raw)
+                    ? CODEX_REASONING_MAP[raw]
+                    : CODEX_DEFAULT_REASONING;
+                if (!normalized) return preserveAuto ? '' : CODEX_DEFAULT_REASONING;
+                return normalized;
+            }
+
+            function syncThinkLevelOptions() {
+                const select = document.getElementById('think-lvl');
+                const model = document.getElementById('model-sel')?.value || '';
+                if (!select) return;
+
+                const current = select.value;
+                const usingCodex = isCodexModel(model);
+                const options = usingCodex ? CODEX_THINKING_OPTIONS : GEMINI_THINKING_OPTIONS;
+                const nextValue = usingCodex
+                    ? normalizeCodexReasoning(current, true)
+                    : current;
+
+                select.innerHTML = options
+                    .map(opt => `<option value="${opt.value}">${opt.label}</option>`)
+                    .join('');
+
+                select.value = options.some(opt => opt.value === nextValue) ? nextValue : '';
             }
 
             function readCfg() {
@@ -2710,7 +2768,7 @@
                         provider: 'codex',
                         auth,
                         model,
-                        reasoning: reasoning || CODEX_DEFAULT_REASONING,
+                        reasoning: normalizeCodexReasoning(reasoning),
                         history_limit: CODEX_DEFAULT_HISTORY_LIMIT,
                         instructions: instructions || undefined,
                         input,
@@ -3758,6 +3816,7 @@ return item;`
             }
 
             function onModelChange() {
+                syncThinkLevelOptions();
                 applyThinkVisibility();
                 syncProviderInput();
                 save();
@@ -3772,6 +3831,7 @@ return item;`
             function save() {
                 const prev = readCfg();
                 const model = document.getElementById('model-sel').value;
+                const thinkValue = document.getElementById('think-lvl').value;
                 const next = {
                     ...prev,
                     model: document.getElementById('model-sel').value,
@@ -3780,7 +3840,7 @@ return item;`
                     topk: document.getElementById('topk').value,
                     maxt: document.getElementById('maxt').value,
                     sysp: document.getElementById('sysp').value,
-                    think: document.getElementById('think-lvl').value
+                    think: isCodexModel(model) ? normalizeCodexReasoning(thinkValue, true) : thinkValue
                 };
 
                 if (isCodexModel(model)) {
@@ -3815,7 +3875,12 @@ return item;`
                 set('topk', s.topk, 'kv');
                 if (s.maxt) document.getElementById('maxt').value = s.maxt;
                 if (s.sysp) document.getElementById('sysp').value = s.sysp;
-                if (s.think !== undefined) document.getElementById('think-lvl').value = s.think;
+                syncThinkLevelOptions();
+                if (s.think !== undefined) {
+                    document.getElementById('think-lvl').value = isCodexModel(document.getElementById('model-sel').value)
+                        ? normalizeCodexReasoning(s.think, true)
+                        : s.think;
+                }
                 applyThinkVisibility();
                 syncProviderInput();
             }
@@ -4146,7 +4211,7 @@ return item;`
                 chat.insertAdjacentHTML('beforeend', msgHTML(convs[activeId].msgs.at(-1), convs[activeId].msgs.length - 1));
 
                 const think = document.getElementById('think-lvl').value;
-                const effectiveThink = usingCodex ? (think || CODEX_DEFAULT_REASONING) : think;
+                const effectiveThink = usingCodex ? normalizeCodexReasoning(think) : think;
                 const isThinking = (supportsThinking(model) && !!think) || (usingCodex && !!effectiveThink);
 
                 const tid = 't' + Date.now();
