@@ -464,6 +464,51 @@ function extractCodexResponseOutputText(responseObj) {
   return chunks;
 }
 
+function normalizeCodexFunctionCallItem(item) {
+  if (!item || typeof item !== "object") return null;
+  if (item.type !== "function_call") return null;
+
+  const name = typeof item.name === "string" ? item.name.trim() : "";
+  const callId = typeof item.call_id === "string" ? item.call_id.trim() : "";
+  const rawArguments = typeof item.arguments === "string"
+    ? item.arguments
+    : JSON.stringify(item.arguments ?? {});
+
+  if (!name || !callId) return null;
+
+  let parsedArguments = {};
+  if (rawArguments.trim()) {
+    try {
+      const parsed = JSON.parse(rawArguments);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        parsedArguments = parsed;
+      }
+    } catch {
+      parsedArguments = {};
+    }
+  }
+
+  return {
+    type: "function_call",
+    id: typeof item.id === "string" ? item.id : callId,
+    call_id: callId,
+    name,
+    arguments: rawArguments,
+    parsed_arguments: parsedArguments
+  };
+}
+
+function extractCodexResponseFunctionCalls(responseObj) {
+  const calls = [];
+  if (!responseObj || typeof responseObj !== "object") return calls;
+  const output = Array.isArray(responseObj.output) ? responseObj.output : [];
+  for (const item of output) {
+    const normalized = normalizeCodexFunctionCallItem(item);
+    if (normalized) calls.push(normalized);
+  }
+  return calls;
+}
+
 function parseCodexSsePayload(raw) {
   const events = [];
   for (const line of String(raw || "").split(/\r?\n/)) {
@@ -480,6 +525,8 @@ function parseCodexSsePayload(raw) {
   let responseId = null;
   const deltaParts = [];
   let finalTextParts = [];
+  let finalResponse = null;
+  const streamedToolCalls = new Map();
 
   for (const event of events) {
     if (!responseId && event && typeof event === "object") {
@@ -492,7 +539,31 @@ function parseCodexSsePayload(raw) {
       if (typeof delta === "string") deltaParts.push(delta);
     }
 
+    if (event?.type === "response.output_item.added") {
+      const normalized = normalizeCodexFunctionCallItem(event.item);
+      if (normalized) {
+        const key = Number.isInteger(event.output_index) ? event.output_index : streamedToolCalls.size;
+        streamedToolCalls.set(key, normalized);
+      }
+    }
+
+    if (event?.type === "response.function_call_arguments.delta" && Number.isInteger(event.output_index)) {
+      const current = streamedToolCalls.get(event.output_index);
+      if (current) {
+        current.arguments += typeof event.delta === "string" ? event.delta : "";
+      }
+    }
+
+    if (event?.type === "response.function_call_arguments.done") {
+      const normalized = normalizeCodexFunctionCallItem(event.item);
+      if (normalized) {
+        const key = Number.isInteger(event.output_index) ? event.output_index : streamedToolCalls.size;
+        streamedToolCalls.set(key, normalized);
+      }
+    }
+
     if (event?.type === "response.completed") {
+      finalResponse = event.response && typeof event.response === "object" ? event.response : null;
       finalTextParts = extractCodexResponseOutputText(event.response);
     }
   }
@@ -505,62 +576,206 @@ function parseCodexSsePayload(raw) {
     last = part;
   }
 
+  const toolCalls = extractCodexResponseFunctionCalls(finalResponse);
+  if (!toolCalls.length && streamedToolCalls.size) {
+    for (const call of streamedToolCalls.values()) {
+      let parsedArguments = {};
+      if (call.arguments.trim()) {
+        try {
+          const parsed = JSON.parse(call.arguments);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            parsedArguments = parsed;
+          }
+        } catch {
+          parsedArguments = {};
+        }
+      }
+      toolCalls.push({
+        ...call,
+        parsed_arguments: parsedArguments
+      });
+    }
+  }
+
   return {
     id: responseId,
     output_text: deduped.join("").trim(),
+    output_items: toolCalls.map((call) => ({
+      type: "function_call",
+      id: call.id,
+      call_id: call.call_id,
+      name: call.name,
+      arguments: call.arguments
+    })),
+    tool_calls: toolCalls.map((call) => ({
+      id: call.id,
+      call_id: call.call_id,
+      name: call.name,
+      arguments: call.parsed_arguments,
+      arguments_raw: call.arguments
+    })),
+    usage: finalResponse?.usage || null,
+    status: finalResponse?.status || null,
     events
   };
 }
 
-function skillflowMsgToCodexText(message) {
-  if (!message || typeof message !== "object") return "";
-
-  const parts = [];
-  if (typeof message.text === "string" && message.text.trim()) {
-    parts.push(message.text.trim());
-  }
-
-  const imageCount = Array.isArray(message.imgs) ? message.imgs.length : 0;
-  const files = Array.isArray(message.files) ? message.files : [];
-  if (imageCount || files.length) {
-    const labels = [];
-    if (imageCount) labels.push(`${imageCount} imagem(ns)`);
-    if (files.length) labels.push(`${files.length} arquivo(s)`);
-    parts.push(`[Anexos na conversa: ${labels.join(" e ")}]`);
-    const fileNames = files.map((file) => file?.name).filter(Boolean);
-    if (fileNames.length) {
-      parts.push(`Arquivos: ${fileNames.join(", ")}`);
-    }
-  }
-
-  return parts.join("\n").trim();
+function makeCodexInputMessage(role, content) {
+  return { role, content };
 }
 
-function makeCodexInputMessage(role, text) {
+function assetDataUrl(asset) {
+  const mimeType = typeof asset?.mimeType === "string" ? asset.mimeType.trim() : "";
+  const data = typeof asset?.data === "string" ? asset.data.trim() : "";
+  if (!mimeType || !data) return null;
+  return `data:${mimeType};base64,${data}`;
+}
+
+function decodeInlineTextAsset(asset) {
+  const mimeType = String(asset?.mimeType || "").trim().toLowerCase();
+  const data = typeof asset?.data === "string" ? asset.data.trim() : "";
+  const isTextLike = mimeType.startsWith("text/")
+    || mimeType === "application/json"
+    || mimeType === "application/xml"
+    || mimeType.endsWith("+json")
+    || mimeType.endsWith("+xml");
+
+  if (!isTextLike || !data) return null;
+
+  try {
+    return Buffer.from(data, "base64").toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+function buildCodexFileSummaryPart(file) {
+  const name = typeof file?.name === "string" && file.name.trim() ? file.name.trim() : "arquivo";
+  const mimeType = typeof file?.mimeType === "string" && file.mimeType.trim()
+    ? file.mimeType.trim()
+    : "application/octet-stream";
+  const decoded = decodeInlineTextAsset(file);
+
+  if (decoded) {
+    const trimmed = decoded.trim();
+    const limit = 12000;
+    const excerpt = trimmed.slice(0, limit);
+    const suffix = trimmed.length > limit ? "\n\n[arquivo truncado]" : "";
+    return {
+      type: "input_text",
+      text: `[Arquivo anexo: ${name} (${mimeType})]\n${excerpt}${suffix}`
+    };
+  }
+
   return {
-    role,
-    content: [{
-      type: role === "assistant" ? "output_text" : "input_text",
-      text
-    }]
+    type: "input_text",
+    text: `[Arquivo anexo: ${name} (${mimeType})]`
   };
 }
 
 function buildCodexContextMessages(messages, historyLimit) {
   const normalized = [];
   const source = Array.isArray(messages) ? messages : [];
-  for (const message of source) {
+  const limit = clampCodexHistoryLimit(historyLimit);
+  const trimmedSource = source.length > limit ? source.slice(-limit) : source;
+  const attachmentIndices = new Set(
+    trimmedSource
+      .reduce((acc, message, index) => {
+        if ((Array.isArray(message?.imgs) && message.imgs.length) || (Array.isArray(message?.files) && message.files.length)) {
+          acc.push(index);
+        }
+        return acc;
+      }, [])
+      .slice(-3)
+  );
+
+  for (let index = 0; index < trimmedSource.length; index += 1) {
+    const message = trimmedSource[index];
+
+    if (message?.type === "function_call_output" && typeof message.call_id === "string") {
+      normalized.push({
+        type: "function_call_output",
+        call_id: message.call_id,
+        output: typeof message.output === "string" ? message.output : JSON.stringify(message.output ?? {})
+      });
+      continue;
+    }
+
+    if (message?.type === "function_call") {
+      const normalizedCall = normalizeCodexFunctionCallItem(message);
+      if (normalizedCall) {
+        normalized.push({
+          type: "function_call",
+          id: normalizedCall.id,
+          call_id: normalizedCall.call_id,
+          name: normalizedCall.name,
+          arguments: normalizedCall.arguments
+        });
+      }
+      continue;
+    }
+
     const role = message?.role === "model" ? "assistant"
       : message?.role === "user" ? "user"
         : null;
     if (!role) continue;
-    const text = skillflowMsgToCodexText(message);
-    if (!text) continue;
-    normalized.push(makeCodexInputMessage(role, text));
+
+    const content = [];
+    if (typeof message.text === "string" && message.text.trim()) {
+      content.push({
+        type: role === "assistant" ? "output_text" : "input_text",
+        text: message.text.trim()
+      });
+    }
+
+    if (role === "user") {
+      const includeAttachments = attachmentIndices.has(index);
+      const images = Array.isArray(message.imgs) ? message.imgs : [];
+      const files = Array.isArray(message.files) ? message.files : [];
+
+      if (includeAttachments) {
+        for (const image of images) {
+          const imageUrl = assetDataUrl(image);
+          if (!imageUrl) continue;
+          content.push({
+            type: "input_image",
+            image_url: imageUrl,
+            detail: "auto"
+          });
+        }
+
+        for (const file of files) {
+          content.push(buildCodexFileSummaryPart(file));
+        }
+      } else if (images.length || files.length) {
+        const labels = [];
+        if (images.length) labels.push(`${images.length} imagem(ns)`);
+        if (files.length) labels.push(`${files.length} arquivo(s)`);
+        content.push({
+          type: "input_text",
+          text: `[Anexos omitidos do contexto: ${labels.join(" e ")}]`
+        });
+      }
+    }
+
+    if (!content.length) continue;
+    normalized.push(makeCodexInputMessage(role, content));
   }
 
-  const limit = clampCodexHistoryLimit(historyLimit);
-  return normalized.length > limit ? normalized.slice(-limit) : normalized;
+  return normalized;
+}
+
+function normalizeCodexTool(tool) {
+  if (!tool || typeof tool !== "object" || Array.isArray(tool)) return null;
+  if (tool.type !== "function") return null;
+  if (typeof tool.name !== "string" || !tool.name.trim()) return null;
+
+  return {
+    type: "function",
+    name: tool.name.trim(),
+    description: typeof tool.description === "string" ? tool.description : "",
+    parameters: tool.parameters && typeof tool.parameters === "object" ? tool.parameters : { type: "object", properties: {} }
+  };
 }
 
 function buildFakeCodexResponse(messages, userInput, model, sessionId) {
@@ -568,6 +783,9 @@ function buildFakeCodexResponse(messages, userInput, model, sessionId) {
   return {
     id: responseId,
     output_text: `[fake:${model}] Conversa ${sessionId || "sem-id"} recebeu ${messages.length} mensagens de contexto. Ultima mensagem: ${userInput}`,
+    output_items: [],
+    tool_calls: [],
+    usage: null,
     events: [{ type: "response.completed", response_id: responseId }]
   };
 }
@@ -577,10 +795,19 @@ async function runCodexChat(payload) {
   const model = String(payload.model || DEFAULT_CODEX_MODEL);
   const reasoning = String(payload.reasoning || DEFAULT_CODEX_REASONING);
   const instructions = String(payload.instructions || DEFAULT_CODEX_INSTRUCTIONS);
-  const contextMessages = buildCodexContextMessages(payload.messages, payload.history_limit);
-  const userInput = contextMessages.at(-1)?.content?.[0]?.text || "";
+  const contextMessages = Array.isArray(payload.input) && payload.input.length
+    ? payload.input
+    : buildCodexContextMessages(payload.messages, payload.history_limit);
+  const lastUserInput = [...contextMessages]
+    .reverse()
+    .find((item) => item?.role === "user" && Array.isArray(item.content));
+  const userInput = lastUserInput?.content?.find((part) => part?.type === "input_text" && typeof part.text === "string")
+    ?.text || "[mensagem multimodal sem texto]";
+  const tools = Array.isArray(payload.tools)
+    ? payload.tools.map(normalizeCodexTool).filter(Boolean)
+    : [];
 
-  if (!userInput) {
+  if (!contextMessages.length || !lastUserInput) {
     throw new Error("Nao foi encontrada nenhuma mensagem valida para enviar ao Codex.");
   }
 
@@ -609,7 +836,8 @@ async function runCodexChat(payload) {
       store: false,
       stream: true,
       reasoning: { effort: reasoning },
-      instructions
+      instructions,
+      ...(tools.length ? { tools } : {})
     })
   });
 
@@ -660,7 +888,14 @@ async function handleChatApi(req, res, user) {
   }
 
   if (!Array.isArray(payload.messages) || !payload.messages.length) {
-    sendJson(res, 400, { error: "messages ausente." });
+    if (!Array.isArray(payload.input) || !payload.input.length) {
+      sendJson(res, 400, { error: "messages/input ausente." });
+      return;
+    }
+  }
+
+  if (payload.tools !== undefined && !Array.isArray(payload.tools)) {
+    sendJson(res, 400, { error: "tools invalido." });
     return;
   }
 
@@ -670,16 +905,22 @@ async function handleChatApi(req, res, user) {
     reasoning: payload.reasoning || DEFAULT_CODEX_REASONING,
     history_limit: payload.history_limit ?? DEFAULT_CODEX_HISTORY_LIMIT,
     instructions: payload.instructions || DEFAULT_CODEX_INSTRUCTIONS,
+    input: Array.isArray(payload.input) ? payload.input : null,
     messages: payload.messages,
+    tools: payload.tools,
     session_id: payload.session_id || `${user.id}-skillflow`
   });
+
+  const contextItems = Array.isArray(payload.input) && payload.input.length
+    ? payload.input
+    : buildCodexContextMessages(payload.messages, payload.history_limit);
 
   sendJson(res, 200, {
     ok: true,
     provider: "codex",
     model: payload.model,
     reasoning: payload.reasoning || DEFAULT_CODEX_REASONING,
-    context_message_count: buildCodexContextMessages(payload.messages, payload.history_limit).length,
+    context_message_count: contextItems.length,
     auth: result.auth,
     payload: result.data
   });

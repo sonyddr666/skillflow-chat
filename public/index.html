@@ -2606,26 +2606,100 @@
                 writeCfg(cfg);
             }
 
-            function buildCodexFrontendMessages(messages) {
-                return (Array.isArray(messages) ? messages : [])
-                    .filter(message => message?.role === 'user' || message?.role === 'model')
-                    .map(message => ({
-                        role: message.role,
-                        text: typeof message.text === 'string' ? message.text : '',
-                        ts: message.ts || Date.now(),
-                        imgs: Array.isArray(message.imgs)
-                            ? message.imgs.map(img => ({ mimeType: img?.mimeType || 'image/*' }))
-                            : [],
-                        files: Array.isArray(message.files)
-                            ? message.files.map(file => ({
-                                name: file?.name || '',
-                                mimeType: file?.mimeType || file?.type || ''
-                            }))
-                            : []
-                    }));
+            function assetDataUrl(asset) {
+                if (!asset?.mimeType || !asset?.data) return null;
+                return `data:${asset.mimeType};base64,${asset.data}`;
             }
 
-            async function requestCodexChat({ auth, model, reasoning, instructions, messages }) {
+            function decodeAttachedText(file) {
+                const mimeType = String(file?.mimeType || '').toLowerCase();
+                const isTextLike = mimeType.startsWith('text/')
+                    || mimeType === 'application/json'
+                    || mimeType === 'application/xml'
+                    || mimeType.endsWith('+json')
+                    || mimeType.endsWith('+xml');
+
+                if (!isTextLike || !file?.data) return null;
+
+                try {
+                    const binary = atob(file.data);
+                    const bytes = Uint8Array.from(binary, ch => ch.charCodeAt(0));
+                    return new TextDecoder().decode(bytes);
+                } catch (_) {
+                    return null;
+                }
+            }
+
+            function buildCodexFileSummary(file) {
+                const name = file?.name || 'arquivo';
+                const mimeType = file?.mimeType || 'application/octet-stream';
+                const decoded = decodeAttachedText(file);
+
+                if (decoded) {
+                    const trimmed = decoded.trim();
+                    const limit = 12000;
+                    return `[Arquivo anexo: ${name} (${mimeType})]\n${trimmed.slice(0, limit)}${trimmed.length > limit ? '\n\n[arquivo truncado]' : ''}`;
+                }
+
+                return `[Arquivo anexo: ${name} (${mimeType})]`;
+            }
+
+            function buildCodexInputFromMessages(messages) {
+                const sourceAll = Array.isArray(messages) ? messages : [];
+                const source = sourceAll.length > CODEX_DEFAULT_HISTORY_LIMIT
+                    ? sourceAll.slice(-CODEX_DEFAULT_HISTORY_LIMIT)
+                    : sourceAll;
+                const recentAttachmentIndices = new Set(
+                    source
+                        .reduce((acc, message, index) => {
+                            if ((message?.imgs?.length || 0) || (message?.files?.length || 0)) acc.push(index);
+                            return acc;
+                        }, [])
+                        .slice(-3)
+                );
+
+                return source
+                    .filter(message => message?.role === 'user' || message?.role === 'model')
+                    .map((message, index) => {
+                        const role = message.role === 'model' ? 'assistant' : 'user';
+                        const content = [];
+
+                        if (typeof message.text === 'string' && message.text.trim()) {
+                            content.push({
+                                type: role === 'assistant' ? 'output_text' : 'input_text',
+                                text: message.text.trim()
+                            });
+                        }
+
+                        if (role === 'user') {
+                            const includeAttachments = recentAttachmentIndices.has(index);
+                            const images = Array.isArray(message.imgs) ? message.imgs : [];
+                            const files = Array.isArray(message.files) ? message.files : [];
+
+                            if (includeAttachments) {
+                                images.forEach(img => {
+                                    const imageUrl = assetDataUrl(img);
+                                    if (!imageUrl) return;
+                                    content.push({ type: 'input_image', image_url: imageUrl, detail: 'auto' });
+                                });
+
+                                files.forEach(file => {
+                                    content.push({ type: 'input_text', text: buildCodexFileSummary(file) });
+                                });
+                            } else if (images.length || files.length) {
+                                const labels = [];
+                                if (images.length) labels.push(`${images.length} imagem(ns)`);
+                                if (files.length) labels.push(`${files.length} arquivo(s)`);
+                                content.push({ type: 'input_text', text: `[Anexos omitidos do contexto: ${labels.join(' e ')}]` });
+                            }
+                        }
+
+                        return content.length ? { role, content } : null;
+                    })
+                    .filter(Boolean);
+            }
+
+            async function requestCodexChat({ auth, model, reasoning, instructions, input, tools }) {
                 if (!auth) throw new Error('Cole a credencial do Codex antes de enviar.');
 
                 const user = window.__skillflowAccount?.getUser?.();
@@ -2639,7 +2713,8 @@
                         reasoning: reasoning || CODEX_DEFAULT_REASONING,
                         history_limit: CODEX_DEFAULT_HISTORY_LIMIT,
                         instructions: instructions || undefined,
-                        messages,
+                        input,
+                        tools,
                         session_id: user?.id ? `${user.id}-skillflow` : 'skillflow'
                     }),
                     signal: ctrl.signal
@@ -2654,6 +2729,20 @@
 
                 if (data.auth) persistCodexAuth(data.auth);
                 return data;
+            }
+
+            function stringifyCodexToolOutput(result) {
+                if (typeof result === 'string') return result;
+                try {
+                    return JSON.stringify(result ?? null, null, 2);
+                } catch (_) {
+                    return String(result);
+                }
+            }
+
+            function codexUsageTotalTokens(usage) {
+                if (!usage || typeof usage !== 'object') return 0;
+                return Number(usage.total_tokens || usage.totalTokens || usage.output_tokens || usage.outputTokens || 0) || 0;
             }
 
             // ─═══════════════════════════════════════════════════════════════════
@@ -3092,6 +3181,16 @@ return {
                 }];
             }
 
+            const OPENAI_SCHEMA_TYPE_MAP = {
+                OBJECT: 'object',
+                STRING: 'string',
+                NUMBER: 'number',
+                INTEGER: 'integer',
+                BOOLEAN: 'boolean',
+                ARRAY: 'array',
+                NULL: 'null'
+            };
+
             // ─ RESOLVE template {{param}} in strings ─
             function resolveTemplate(template, args) {
                 return String(template).replace(/\{\{(\w+)\}\}/g, (_, k) => encodeURIComponent(args[k] ?? ''));
@@ -3143,6 +3242,34 @@ return {
                     if (v.required) req.push(k);
                 });
                 return { type: 'OBJECT', properties: props, ...(req.length ? { required: req } : {}) };
+            }
+
+            function normalizeOpenAISchemaNode(value) {
+                if (Array.isArray(value)) return value.map(normalizeOpenAISchemaNode);
+                if (!value || typeof value !== 'object') return value;
+
+                const out = {};
+                Object.entries(value).forEach(([key, nested]) => {
+                    if (key === 'type' && typeof nested === 'string') {
+                        const mapped = OPENAI_SCHEMA_TYPE_MAP[nested.toUpperCase()];
+                        out[key] = mapped || nested.toLowerCase();
+                        return;
+                    }
+                    out[key] = normalizeOpenAISchemaNode(nested);
+                });
+                return out;
+            }
+
+            function buildCodexTools() {
+                return plugins
+                    .filter(p => p.enabled)
+                    .map(p => ({
+                        type: 'function',
+                        name: p.name,
+                        description: p.description || '',
+                        parameters: normalizeOpenAISchemaNode(normalizeParams(p.parameters)),
+                        strict: false
+                    }));
             }
 
             async function executePlugin(name, args) {
@@ -4001,16 +4128,73 @@ return {
                     let full = '';
                     let tok = 0;
                     let sig = '';
+                    const codexTools = usingCodex ? buildCodexTools() : [];
 
-                    if (usingCodex) {
+                    async function callCodexAPI(inputItems, depth) {
                         const result = await requestCodexChat({
                             auth: codexAuth,
                             model,
                             reasoning: effectiveThink,
                             instructions: sysp,
-                            messages: buildCodexFrontendMessages(convs[activeId].msgs)
+                            input: inputItems,
+                            tools: codexTools
                         });
-                        full = result?.payload?.output_text || '';
+
+                        const payload = result?.payload || {};
+                        const toolCalls = Array.isArray(payload.tool_calls) ? payload.tool_calls : [];
+                        const outputItems = Array.isArray(payload.output_items) ? payload.output_items : [];
+
+                        if (toolCalls.length) {
+                            if (depth >= 6) throw new Error('Limite de function calls atingido para o Codex.');
+
+                            const callLabels = toolCalls.map(call => {
+                                const args = call.arguments || {};
+                                const argStr = Object.entries(args).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ');
+                                return `<code style="background:var(--s2);padding:2px 6px;border-radius:4px">${call.name}(${argStr})</code>`;
+                            }).join(' <span style="color:var(--muted)">+</span> ');
+
+                            bub.innerHTML = `<div style="color:var(--accent2);font-size:13px;display:flex;align-items:center;gap:8px;padding:4px 0;flex-wrap:wrap">
+          <span style="display:inline-block;animation:bop 1s infinite">🔍</span>
+          <span>Chamando ${callLabels} …</span>
+        </div>`;
+                            scrollEnd();
+
+                            const results = await Promise.all(
+                                toolCalls.map(call => executePlugin(call.name, call.arguments || {}))
+                            );
+                            const assistantToolItems = outputItems.length
+                                ? outputItems
+                                : toolCalls.map(call => ({
+                                    type: 'function_call',
+                                    id: call.id || call.call_id,
+                                    call_id: call.call_id,
+                                    name: call.name,
+                                    arguments: call.arguments_raw || JSON.stringify(call.arguments || {})
+                                }));
+
+                            const nextInput = [
+                                ...inputItems,
+                                ...assistantToolItems,
+                                ...toolCalls.map((call, index) => ({
+                                    type: 'function_call_output',
+                                    call_id: call.call_id,
+                                    output: stringifyCodexToolOutput(results[index])
+                                }))
+                            ];
+
+                            return callCodexAPI(nextInput, depth + 1);
+                        }
+
+                        return {
+                            full: payload.output_text || '',
+                            tok: codexUsageTotalTokens(payload.usage)
+                        };
+                    }
+
+                    if (usingCodex) {
+                        const codexResult = await callCodexAPI(buildCodexInputFromMessages(convs[activeId].msgs), 0);
+                        full = codexResult.full || '';
+                        tok = codexResult.tok || 0;
                         if (full) {
                             bub.innerHTML = renderMarkdown(full);
                             scrollEnd();
