@@ -3425,25 +3425,60 @@ return item;`
                 return out;
             }
 
-            function buildCodexTools() {
+            function normalizeCodexToolName(name, fallback) {
+                const raw = String(name || fallback || 'tool')
+                    .normalize('NFD')
+                    .replace(/[\u0300-\u036f]/g, '')
+                    .replace(/[^a-zA-Z0-9_-]+/g, '_')
+                    .replace(/^_+|_+$/g, '')
+                    .slice(0, 64);
+
+                if (raw) return raw;
+
+                return String(fallback || 'tool')
+                    .replace(/[^a-zA-Z0-9_-]+/g, '_')
+                    .replace(/^_+|_+$/g, '')
+                    .slice(0, 64) || 'tool';
+            }
+
+            function buildCodexToolEntries() {
+                const used = new Set();
+
                 return plugins
                     .filter(p => p.enabled)
-                    .map(p => ({
-                        type: 'function',
-                        name: p.name,
-                        description: p.description || '',
-                        parameters: normalizeOpenAISchemaNode(normalizeParams(p.parameters)),
-                        strict: false
-                    }));
+                    .map((plugin, index) => {
+                        const base = normalizeCodexToolName(plugin.name, plugin.id || `tool_${index}`);
+                        let callName = base;
+                        let suffix = 1;
+
+                        while (used.has(callName)) {
+                            const suffixText = `_${suffix++}`;
+                            callName = `${base.slice(0, Math.max(1, 64 - suffixText.length))}${suffixText}`;
+                        }
+
+                        used.add(callName);
+                        return { plugin, callName };
+                    });
+            }
+
+            function buildCodexTools() {
+                return buildCodexToolEntries().map(({ plugin, callName }) => ({
+                    type: 'function',
+                    name: callName,
+                    description: plugin.description || '',
+                    parameters: normalizeOpenAISchemaNode(normalizeParams(plugin.parameters)),
+                    strict: false
+                }));
             }
 
             async function executePlugin(name, args) {
-                const p = plugins.find(x => x.name === name && x.enabled);
+                const codexEntry = buildCodexToolEntries().find(entry => entry.callName === name);
+                const p = plugins.find(x => x.name === name && x.enabled) || codexEntry?.plugin;
                 if (!p) return { error: `Plugin '${name}' não encontrado` };
 
                 // ── Built-in native handler ──
                 if (p.builtin) {
-                    const h = BUILTIN_HANDLERS[name];
+                    const h = BUILTIN_HANDLERS[p.name];
                     if (!h) return { error: `Handler builtin '${name}' não implementado` };
                     try { return h(args); } catch (e) { return { error: e.message }; }
                 }
