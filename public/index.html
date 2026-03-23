@@ -2745,6 +2745,78 @@
                 return Number(usage.total_tokens || usage.totalTokens || usage.output_tokens || usage.outputTokens || 0) || 0;
             }
 
+            async function fetchLocalJson(url, options) {
+                const res = await fetch(url, {
+                    credentials: 'same-origin',
+                    cache: 'no-store',
+                    ...options
+                });
+                const ct = res.headers.get('content-type') || '';
+                const data = ct.includes('application/json')
+                    ? await res.json().catch(() => ({}))
+                    : { error: await res.text().catch(() => '') };
+                if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                return data;
+            }
+
+            function summarizePlugin(plugin) {
+                return {
+                    id: plugin.id,
+                    name: plugin.name,
+                    description: plugin.description || '',
+                    enabled: plugin.enabled !== false,
+                    builtin: plugin.builtin === true,
+                    source: plugin.builtin ? 'builtin' : 'custom'
+                };
+            }
+
+            async function discoverWorkspaceSkillCandidates(path) {
+                const basePath = String(path || '').trim();
+                const payload = await fetchLocalJson('/api/fs/list?path=' + encodeURIComponent(basePath));
+                const items = Array.isArray(payload.items) ? payload.items : [];
+                const directories = items.filter(item => item.type === 'directory');
+                const candidates = [];
+
+                for (const entry of directories) {
+                    const name = String(entry.name || '');
+                    if (!/^skill[-_]/i.test(name)) continue;
+
+                    let nestedItems = [];
+                    try {
+                        const nested = await fetchLocalJson('/api/fs/list?path=' + encodeURIComponent(entry.path || name));
+                        nestedItems = Array.isArray(nested.items) ? nested.items : [];
+                    } catch (_) { }
+
+                    const files = nestedItems
+                        .filter(item => item.type === 'file')
+                        .map(item => item.name);
+
+                    const markers = files.filter(fileName =>
+                        /^main\./i.test(fileName)
+                        || /^readme/i.test(fileName)
+                        || /^requirements/i.test(fileName)
+                        || /^skill\.json$/i.test(fileName)
+                        || /^manifest\.json$/i.test(fileName)
+                    );
+
+                    candidates.push({
+                        name,
+                        path: entry.path || name,
+                        files,
+                        markers,
+                        status: markers.some(fileName => /^skill\.json$|^manifest\.json$/i.test(fileName))
+                            ? 'manifest-ready'
+                            : 'workspace-only'
+                    });
+                }
+
+                return {
+                    path: payload.path || basePath,
+                    candidates,
+                    total_candidates: candidates.length
+                };
+            }
+
             // ─═══════════════════════════════════════════════════════════════════
             // PLUGIN ARENA — Dynamic Function Calling System
             // ─═══════════════════════════════════════════════════════════════════
@@ -2803,6 +2875,83 @@
                         const result = Function('"use strict"; return (' + expr + ')')();
                         return { expression: expr, result, type: typeof result };
                     } catch (e) { return { error: e.message }; }
+                },
+                async get_workspace_context(args) {
+                    const cfg = readCfg();
+                    const memory = JSON.parse(localStorage.getItem('gc_user_memory') || '{}');
+                    const user = window.__skillflowAccount?.getUser?.() || null;
+                    const workspaceSkills = await discoverWorkspaceSkillCandidates(args.path || '');
+                    return {
+                        user: user ? { id: user.id, login: user.login } : null,
+                        active_conversation: convs[activeId]?.title || '',
+                        model: cfg.model || document.getElementById('model-sel')?.value || '',
+                        system_prompt: document.getElementById('sysp')?.value || '',
+                        enabled_skills: plugins.filter(p => p.enabled).map(summarizePlugin),
+                        registered_skills: plugins.map(summarizePlugin),
+                        workspace_skill_candidates: workspaceSkills.candidates,
+                        memory_namespaces: Object.keys(memory)
+                    };
+                },
+                async list_skill_marketplace(args) {
+                    const workspaceSkills = await discoverWorkspaceSkillCandidates(args.path || '');
+                    return {
+                        registered_skills: plugins.map(summarizePlugin),
+                        enabled_skills: plugins.filter(p => p.enabled).map(summarizePlugin),
+                        workspace_skill_candidates: workspaceSkills.candidates,
+                        note: 'Arquivos criados na workspace nao viram skills automaticamente; para isso use save_registered_skill.'
+                    };
+                },
+                async list_registered_skills() {
+                    const data = await fetchLocalJson('/api/skills');
+                    return {
+                        skills: Array.isArray(data.skills) ? data.skills.map(summarizePlugin) : [],
+                        total: Array.isArray(data.skills) ? data.skills.length : 0
+                    };
+                },
+                async discover_workspace_skills(args) {
+                    return discoverWorkspaceSkillCandidates(args.path || '');
+                },
+                async save_registered_skill(args) {
+                    const skillName = String(args.name || args.id || '').trim();
+                    const skillDescription = String(args.description || '').trim();
+                    if (!skillName) return { error: 'name obrigatorio' };
+                    if (!skillDescription) return { error: 'description obrigatorio' };
+                    if (!(args.action && typeof args.action === 'object') && !String(args.code || '').trim()) {
+                        return { error: 'forneca code ou action para registrar a skill' };
+                    }
+
+                    const payload = {
+                        id: String(args.id || args.name || '').trim(),
+                        name: skillName,
+                        description: skillDescription,
+                        icon: String(args.icon || '⚙').trim() || '⚙',
+                        enabled: args.enabled !== false,
+                        parameters: args.parameters && typeof args.parameters === 'object'
+                            ? args.parameters
+                            : { type: 'OBJECT', properties: {} }
+                    };
+
+                    if (args.action && typeof args.action === 'object') payload.action = args.action;
+                    else payload.code = String(args.code || '').trim();
+
+                    const data = await fetchLocalJson('/api/skills', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    await loadPlugins();
+                    return {
+                        ok: true,
+                        skill: data.skill || null,
+                        note: 'Skill registrada na plataforma. Criar arquivos na workspace, sozinho, nao registra uma skill.'
+                    };
+                },
+                async delete_registered_skill(args) {
+                    const id = String(args.id || '').trim();
+                    if (!id) return { error: 'id obrigatorio' };
+                    await fetchLocalJson('/api/skills/' + encodeURIComponent(id), { method: 'DELETE' });
+                    await loadPlugins();
+                    return { ok: true, id };
                 }
             };
 
@@ -2878,7 +3027,7 @@
                 },
                 {
                     id: 'sv_fs_list', builtin: false, enabled: true, icon: '📁', name: 'server_list_files',
-                    description: 'Lista arquivos e pastas da workspace do servidor via backend local. Prefira esta tool para navegar arquivos do deploy em vez de assumir acesso direto do browser ao filesystem.',
+                    description: 'Lista arquivos e pastas da workspace do servidor via backend local. Isso navega somente a workspace do usuario e nao o registro real de skills da plataforma.',
                     parameters: {
                         type: 'OBJECT',
                         properties: {
@@ -2909,7 +3058,7 @@
                 },
                 {
                     id: 'sv_fs_write', builtin: false, enabled: true, icon: '📝', name: 'server_write_file',
-                    description: 'Cria ou edita um arquivo de texto na workspace do servidor via backend local. Use para persistir conteúdo real no deploy sem depender de localStorage.',
+                    description: 'Cria ou edita um arquivo de texto na workspace do servidor via backend local. Isso cria arquivo real, mas nao registra uma skill da plataforma por si so.',
                     parameters: {
                         type: 'OBJECT',
                         properties: {
@@ -2934,7 +3083,7 @@
                 },
                 {
                     id: 'sv_fs_mkdir', builtin: false, enabled: true, icon: '📂', name: 'server_make_directory',
-                    description: 'Cria uma pasta na workspace do servidor via backend local. Use antes de escrever arquivos em novas áreas da workspace.',
+                    description: 'Cria uma pasta na workspace do servidor via backend local. Isso so cria diretorio na workspace; nao cria uma skill registrada.',
                     parameters: {
                         type: 'OBJECT',
                         properties: {
@@ -2991,22 +3140,9 @@
                     }
                 },
                 {
-                    id: 'wf_context', builtin: false, enabled: true, icon: '🗂️', name: 'get_workspace_context',
-                    description: 'Retorna o contexto atual do chat: conversa ativa, modelo, prompt de sistema, TTS e resumo das skills habilitadas.',
-                    parameters: { type: 'OBJECT', properties: {} },
-                    code: `
-const cfg = JSON.parse(localStorage.getItem('gc_cfg') || '{}');
-const memory = JSON.parse(localStorage.getItem('gc_user_memory') || '{}');
-const packs = JSON.parse(localStorage.getItem('gc_skill_packs') || '["core-chat","voice","workspace","automation"]');
-return {
-  active_conversation: convs[activeId]?.title || '',
-  model: cfg.model || document.getElementById('model-sel')?.value || '',
-  system_prompt: document.getElementById('sysp')?.value || '',
-  tts_voice: document.getElementById('tts-voice-sel')?.value || '',
-  tts_autoplay: document.getElementById('tts-autoplay')?.checked || false,
-  skill_packs: packs,
-  memory_keys: Object.keys(memory)
-};`
+                    id: 'wf_context', builtin: true, enabled: true, icon: '🗂️', name: 'get_workspace_context',
+                    description: 'Retorna o contexto real do usuario atual: conversa, modelo, skills registradas, skills habilitadas e pastas skill_* encontradas na workspace.',
+                    parameters: { type: 'OBJECT', properties: { path: { type: 'STRING', description: 'Caminho opcional dentro da workspace para procurar skill_*' } } }
                 },
                 {
                     id: 'wf_memory_set', builtin: false, enabled: true, icon: '🧠', name: 'save_user_memory',
@@ -3073,19 +3209,48 @@ localStorage.setItem('gc_pending_approvals', JSON.stringify(approvals));
 return item;`
                 },
                 {
-                    id: 'wf_market', builtin: false, enabled: true, icon: '🧩', name: 'list_skill_marketplace',
-                    description: 'Retorna um catálogo resumido de skills e packs disponíveis para o assistente.',
-                    parameters: { type: 'OBJECT', properties: {} },
-                    code: `
-return {
-  packs: [
-    { name: 'core-chat', includes: ['history', 'search', 'stats', 'routing'] },
-    { name: 'workspace', includes: ['files', 'ocr', 'document parsing', 'reports'] },
-    { name: 'voice', includes: ['stt', 'tts', 'live mode', 'audio output'] },
-    { name: 'automation', includes: ['cron', 'webhooks', 'background agents', 'approvals'] },
-    { name: 'integrations', includes: ['http_request', 'REST', 'GraphQL', 'external tools'] }
-  ]
-};`
+                    id: 'wf_market', builtin: true, enabled: true, icon: '🧩', name: 'list_skill_marketplace',
+                    description: 'Lista as skills reais registradas, as skills habilitadas e as pastas skill_* da workspace do usuario atual. Nao retorna catalogo fake.',
+                    parameters: { type: 'OBJECT', properties: { path: { type: 'STRING', description: 'Caminho opcional dentro da workspace para procurar skill_*' } } }
+                },
+                {
+                    id: 'sv_skill_list', builtin: true, enabled: true, icon: '🧾', name: 'list_registered_skills',
+                    description: 'Lista as skills customizadas reais salvas no registro da plataforma para o usuario atual.',
+                    parameters: { type: 'OBJECT', properties: {} }
+                },
+                {
+                    id: 'sv_skill_discover', builtin: true, enabled: true, icon: '🔎', name: 'discover_workspace_skills',
+                    description: 'Procura pastas skill_* dentro da workspace do usuario atual e mostra quais parecem candidatas a skill.',
+                    parameters: { type: 'OBJECT', properties: { path: { type: 'STRING', description: 'Caminho opcional dentro da workspace para procurar skill_*' } } }
+                },
+                {
+                    id: 'sv_skill_save', builtin: true, enabled: true, icon: '✨', name: 'save_registered_skill',
+                    description: 'Cria ou atualiza uma skill real no registro da plataforma. Use esta tool quando precisar criar uma skill utilizavel; escrever arquivos na workspace nao basta.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            id: { type: 'STRING', description: 'ID estavel da skill' },
+                            name: { type: 'STRING', description: 'Nome da skill' },
+                            description: { type: 'STRING', description: 'Descricao objetiva do que a skill faz' },
+                            icon: { type: 'STRING', description: 'Icone opcional' },
+                            enabled: { type: 'BOOLEAN', description: 'Se a skill deve nascer habilitada' },
+                            parameters: { type: 'OBJECT', description: 'Schema JSON dos parametros da skill', properties: {} },
+                            code: { type: 'STRING', description: 'Codigo JavaScript da skill. Forneca code ou action.' },
+                            action: { type: 'OBJECT', description: 'Acao HTTP opcional da skill. Forneca code ou action.', properties: {} }
+                        },
+                        required: ['name', 'description']
+                    }
+                },
+                {
+                    id: 'sv_skill_delete', builtin: true, enabled: true, icon: '🗑️', name: 'delete_registered_skill',
+                    description: 'Apaga uma skill customizada real do registro da plataforma pelo id.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            id: { type: 'STRING', description: 'ID da skill a apagar' }
+                        },
+                        required: ['id']
+                    }
                 }
             ];
 
