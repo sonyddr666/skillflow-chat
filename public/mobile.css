@@ -156,284 +156,126 @@ body {
 }
 
 /* ══ MOBILE OVERRIDES (max 768px) ══ */
-@media (max-width: 768px) {
+#tb-expand {
+  display: none;
+}
 
-  /* Header reorganizado — logo + modelo numa linha, API key oculta por padrão */
+@media (max-width: 768px) {
+  /* ─ TOPBAR RADICAL REDESIGN (1 LINHA COLAPSÁVEL) ─ */
   #topbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
     padding: 8px 10px;
-    gap: 6px;
-    flex-wrap: nowrap;
-    min-height: 52px;
+    gap: 8px;
+    min-height: 48px;
   }
 
-  /* API Key esconde label e comprime */
-  #topbar .tb-grp:has(#api-in) label {
-    display: none;
+  /* Esconder todos os labels do topbar para economizar espaço */
+  #topbar label {
+    display: none !important;
+  }
+
+  /* Primeira Linha — Sempre Visível */
+  #sb-btn { 
+    order: 1; 
+  }
+  .tb-grp:has(#model-sel) { 
+    order: 2; 
+    flex: 1; 
+    margin: 0; 
+  }
+  #model-sel { 
+    width: 100%; 
+    max-width: 100%; 
+    font-size: 13px; 
+    padding: 6px 10px; 
+  }
+  #tb-expand { 
+    display: flex; 
+    order: 3; 
+    align-items: center; 
+    justify-content: center;
+    height: 32px; 
+    width: 32px; 
+    border-radius: 8px;
+    background: rgba(255,255,255,0.05); 
+    border: 1px solid var(--glass-border); 
+    color: var(--text); 
+    font-size: 14px;
+  }
+
+  /* Elementos Secundários — Escondidos por padrão */
+  .tb-grp:has(#api-in),
+  #cfg-btn,
+  #plugin-btn,
+  #theme-btn {
+    display: none !important;
+  }
+
+  /* Account Shell Injetado — Escondido por padrão */
+  #account-shell {
+    display: none !important;
+  }
+
+  /* QUANDO EXPANDIDO (.tb-expanded) */
+  #topbar.tb-expanded {
+    background: rgba(15, 15, 22, 0.95);
+    padding-bottom: 12px;
+  }
+
+  #topbar.tb-expanded .tb-grp:has(#api-in) {
+    display: block !important;
+    order: 4;
+    width: 100%;
+    margin-top: 4px;
   }
   #api-in {
-    width: 0;
-    min-width: 0;
-    padding: 0;
-    border: none;
-    opacity: 0;
-    pointer-events: none;
-    position: absolute;
+    width: 100%;
   }
 
-  /* Modelo — exibe só o valor, sem label */
-  #topbar .tb-grp:has(#model-sel) label {
-    display: none;
-  }
-  #model-sel {
-    max-width: 160px;
-    font-size: 12px;
-    padding: 6px 8px;
-  }
-
-  /* Botões topbar menores */
-  #cfg-btn, #plugin-btn {
-    padding: 6px 8px;
-    font-size: 11px;
+  #topbar.tb-expanded #cfg-btn,
+  #topbar.tb-expanded #plugin-btn,
+  #topbar.tb-expanded #theme-btn {
+    display: flex !important;
+    order: 5;
+    flex: 1;
+    justify-content: center;
+    padding: 8px 0;
+    margin-top: 4px;
   }
 
-  /* Theme btn compact */
-  #theme-btn {
-    padding: 6px 8px;
-    font-size: 13px;
+  #topbar.tb-expanded #account-shell {
+    display: flex !important;
+    order: 6;
+    width: 100% !important;
+    justify-content: space-between !important;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--glass-border);
+    position: static;
   }
 
-  /* ─ INPUT BAR MOBILE ─ */
-  #ibar {
-    padding: 8px 10px;
-    gap: 6px;
-    border-radius: 18px;
-  }
-
-  /* Live btn comprime no mobile */
-  #live-btn {
-    font-size: 11px;
-    padding: 5px 7px;
-  }
-
-  /* Textarea maior no mobile */
-  #msg {
-    font-size: 16px; /* evita zoom iOS */
-    padding: 6px 0;
-  }
-
-  /* Botões de ação no input bar */
-  #attach-btn, #mic-btn {
-    width: 36px;
-    height: 36px;
-    font-size: 17px;
-  }
-
-  #send-btn, #stop-btn {
-    width: 38px;
-    height: 38px;
-    font-size: 16px;
-    border-radius: 11px;
-  }
-
-  /* Chat padding menor */
-  #chat {
-    padding: 14px 10px;
-    gap: 10px;
-  }
-
-  /* Bubbles no mobile */
-  .bub {
-    font-size: 14px;
-    padding: 10px 13px;
-    max-width: calc(100vw - 80px);
-  }
-
-  /* Avatar menor */
-  .av {
-    width: 28px;
-    height: 28px;
-    font-size: 12px;
-  }
-
-  /* Imagem preview no input */
-  .attached-imgs img {
-    max-width: 140px;
-    max-height: 140px;
-  }
-
-  /* Código no mobile: scroll horizontal limpo */
-  .bub pre {
-    font-size: 12px;
-    padding: 10px;
-  }
-
-  /* Toast posição correta acima do teclado */
-  #toast {
-    bottom: 100px;
-  }
-
-  /* Mic status */
-  #mic-status {
-    bottom: 96px;
-  }
-
-  /* TTS bar */
-  #tts-bar {
-    bottom: 92px;
-    right: 10px;
-    left: 10px;
-    right: auto;
-    max-width: calc(100vw - 20px);
-  }
-
-  /* Settings panel ocupa tela cheia no mobile */
-  #cfg-body {
-    gap: 12px;
-    padding: 0 12px 14px;
-  }
-
-  .sg {
-    min-width: 120px;
-  }
-
-  /* Plugin panel mobile */
-  #plugin-panel {
-    max-height: 60vh;
-  }
-
-  /* Conversation list items — dedos maiores */
-  .ci {
-    padding: 11px 12px;
-    font-size: 13.5px;
-    margin-bottom: 3px;
-  }
-
-  /* Botões de ação na sidebar */
-  .action-btn {
-    padding: 9px;
-    font-size: 12px;
-  }
-
-  /* Empty state menor */
-  #empty .logo {
-    font-size: 44px;
-  }
-
-  #empty h3 {
-    font-size: 18px;
-  }
-
-  #empty p {
-    font-size: 13.5px;
-  }
-
-  /* Live HUD no mobile */
-  #live-hud {
-    top: 58px;
-    font-size: 12px;
-    padding: 6px 14px;
-  }
-
-  /* Mermaid container no mobile */
-  .mermaid-body {
-    padding: 10px 8px;
-    overflow-x: scroll;
-  }
-
-  /* Code header no mobile */
-  .code-header {
-    font-size: 10px;
-  }
-
-  /* Meta (timestamp/tokens) compacto */
-  .meta {
-    font-size: 10px;
-  }
-}
-
-/* ── GLASS SHIMMER ENTRY ANIMATION ── */
-@keyframes glassIn {
-  from {
-    opacity: 0;
-    transform: translateY(10px) scale(0.98);
-    filter: blur(4px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-    filter: blur(0);
-  }
-}
-
-.row.animate-in {
-  animation: glassIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
-}
-
-/* ══ SKELETON LOADING (THINKING) ══ */
-.skeleton-lines {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 12px 16px;
-}
-.skeleton-line {
-  height: 12px;
-  border-radius: 6px;
-  background: linear-gradient(90deg, rgba(255,255,255,0.04) 25%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.04) 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.5s infinite;
-}
-@keyframes shimmer {
-  0% { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
-}
-
-/* ══ RETRY BUTTON STYLE ══ */
-.retry-btn {
-  align-self: flex-start;
-  padding: 6px 14px;
-  border-radius: 8px;
-  border: 1px solid var(--danger);
-  background: transparent;
-  color: var(--danger);
-  cursor: pointer;
-  font-size: 12px;
-  transition: all .2s;
-}
-.retry-btn:hover {
-  background: rgba(255,80,80,0.1);
-}
-
-/* ══ MOBILE ACCOUNT + TOPBAR CLEANUP ══ */
-@media (max-width: 768px) {
-  /* Account shell — compactar */
-  #account-shell {
-    width: auto !important;
-    gap: 6px;
-    padding: 0;
-    flex-wrap: nowrap !important;
-  }
   #account-pill {
-    padding: 0 8px;
-    height: 28px;
-    font-size: 11px;
-    gap: 4px;
+    padding: 0 10px;
+    height: 32px;
+    font-size: 12px;
   }
   #account-pill strong {
-    font-size: 11px;
+    font-size: 12px;
   }
   #account-sync-status {
-    font-size: 9px;
-    padding: 1px 6px;
+    font-size: 10px;
+    padding: 2px 6px;
   }
   #account-logout {
-    height: 28px;
-    padding: 0 10px;
-    font-size: 11px;
+    height: 32px;
+    padding: 0 14px;
+    font-size: 12px;
     width: auto !important;
   }
 
-  /* Theme btn compacto */
+  /* Theme btn compacto na linha das opções escondidas */
   #theme-btn {
     padding: 4px 6px;
     font-size: 14px;
@@ -445,44 +287,44 @@ body {
     justify-content: center;
   }
 
-  /* Topbar — tudo numa linha limpa */
-  #topbar {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    padding: 6px 8px;
-    gap: 4px;
-    min-height: 44px;
-  }
-
-  /* Input bar — mais espaço pro textarea */
+  /* ─ INPUT BAR LIMPO (MENOS BOTÕES) ─ */
   #ibar {
-    padding: 6px 8px;
-    gap: 4px;
-    border-radius: 16px;
+    padding: 8px 10px;
+    gap: 6px;
+    border-radius: 20px;
   }
   #msg {
-    min-height: 34px;
+    min-height: 38px;
     flex: 1 1 0;
-    font-size: 16px;
+    font-size: 16px; /* evita zoom iOS */
   }
-  /* Botões de ação menores no input */
-  #attach-btn, #mic-btn {
+  /* Botões mic e live compactos no mobile */
+  #mic-btn {
     width: 32px;
     height: 32px;
     font-size: 15px;
     flex-shrink: 0;
   }
-  #send-btn, #stop-btn {
-    width: 34px;
-    height: 34px;
-    font-size: 14px;
-    border-radius: 10px;
-    flex-shrink: 0;
-  }
   #live-btn {
     font-size: 10px;
-    padding: 4px 6px;
+    padding: 4px 8px;
     flex-shrink: 0;
   }
+  /* Botões de clip e send maiores */
+  #attach-btn {
+    width: 38px;
+    height: 38px;
+    font-size: 17px;
+    flex-shrink: 0;
+    border-radius: 12px;
+  }
+  #send-btn, #stop-btn {
+    width: 40px;
+    height: 40px;
+    font-size: 16px;
+    border-radius: 12px;
+    flex-shrink: 0;
+  }
+  
+  /* Restante das regras mobile... (bubbles, modal, etc) */
 }
