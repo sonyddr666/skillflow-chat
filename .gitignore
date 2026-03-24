@@ -1,0 +1,13 @@
+# Runtime data — user state, sessions, workspace files
+workspace/
+skills/
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
