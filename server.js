@@ -1,7 +1,8 @@
 import { createServer } from "node:http";
+import { spawn } from "node:child_process";
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { dirname, extname, join, normalize, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -25,6 +26,12 @@ const DEFAULT_CODEX_HISTORY_LIMIT = 40;
 const DEFAULT_CODEX_INSTRUCTIONS = process.env.SKILLFLOW_CODEX_DEFAULT_INSTRUCTIONS
   || "Responda em portugues do Brasil e mantenha continuidade com base na conversa.";
 const CODEX_FAKE_RESPONSES = false;
+const EXECUTION_STATE_KEY = "sf_exec";
+const DEFAULT_EXEC_TIMEOUT_MS = 5 * 60 * 1000;
+const MAX_EXEC_TIMEOUT_MS = 60 * 60 * 1000;
+const MAX_EXEC_HISTORY_ITEMS = 100;
+const MAX_EXEC_LOG_TAIL_BYTES = 64 * 1024;
+const activeExecutions = new Map();
 
 const STATE_KEYS = [
   "gc_cfg",
@@ -44,6 +51,7 @@ const MIME_TYPES = {
   ".js": "application/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".pdf": "application/pdf",
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -64,6 +72,15 @@ function sendJson(res, status, payload, extraHeaders = {}) {
 function sendRedirect(res, location) {
   res.writeHead(302, { Location: location });
   res.end();
+}
+
+function attachmentDisposition(fileName) {
+  const fallback = String(fileName || "download")
+    .replace(/["\\]/g, "_")
+    .replace(/[^\x20-\x7E]+/g, "_")
+    .trim() || "download";
+  const encoded = encodeURIComponent(String(fileName || fallback));
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 
 async function readRequestBody(req) {
@@ -148,6 +165,10 @@ function userWorkspaceDir(user) {
   return join(workspaceRootDir, user.id);
 }
 
+function userRunsDir(user) {
+  return join(userWorkspaceDir(user), ".runs");
+}
+
 function userStateFile(user) {
   return join(userStateDir, `${user.id}.json`);
 }
@@ -156,6 +177,7 @@ async function ensureUserDirs(user) {
   await ensureBaseDirs();
   await mkdir(userSkillsDir(user), { recursive: true });
   await mkdir(userWorkspaceDir(user), { recursive: true });
+  await mkdir(userRunsDir(user), { recursive: true });
   if (!existsSync(userStateFile(user))) {
     await writeFile(userStateFile(user), "{}\n", "utf8");
   }
@@ -318,6 +340,403 @@ async function loadUserState(user) {
 async function saveUserState(user, nextState) {
   await ensureUserDirs(user);
   await writeFile(userStateFile(user), `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+}
+
+function executionDir(user, runId) {
+  return join(userRunsDir(user), runId);
+}
+
+function executionPaths(user, runId) {
+  const dir = executionDir(user, runId);
+  return {
+    dir,
+    request: join(dir, "request.json"),
+    result: join(dir, "result.json"),
+    stdout: join(dir, "stdout.log"),
+    stderr: join(dir, "stderr.log")
+  };
+}
+
+function executionRelativePath(runId, fileName) {
+  return normalizeRelativePath(join(".runs", runId, fileName));
+}
+
+function generateRunId() {
+  return `exec_${Date.now().toString(36)}_${randomBytes(5).toString("hex")}`;
+}
+
+function normalizeRunId(input) {
+  const value = String(input || "").trim().toLowerCase();
+  return /^[a-z0-9_-]{6,120}$/.test(value) ? value : "";
+}
+
+function clampInteger(value, fallback, min, max) {
+  const parsed = Number.parseInt(String(value ?? fallback), 10);
+  if (Number.isNaN(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+function clampExecTimeoutMs(value) {
+  return clampInteger(value, DEFAULT_EXEC_TIMEOUT_MS, 1000, MAX_EXEC_TIMEOUT_MS);
+}
+
+function clampExecHistoryLimit(value) {
+  return clampInteger(value, 20, 1, MAX_EXEC_HISTORY_ITEMS);
+}
+
+function clampExecLogTailBytes(value) {
+  return clampInteger(value, 16 * 1024, 512, MAX_EXEC_LOG_TAIL_BYTES);
+}
+
+function parseOptionalBoolean(value, fallback) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function normalizeExecEnv(input) {
+  if (input === undefined || input === null) return {};
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("env precisa ser um objeto simples");
+  }
+
+  const env = {};
+  for (const [key, value] of Object.entries(input)) {
+    const name = String(key || "").trim();
+    if (!name) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new Error(`env invalido: ${name}`);
+    }
+    env[name] = String(value ?? "");
+  }
+  return env;
+}
+
+function normalizeExecPayload(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("Payload de execucao invalido");
+  }
+
+  const command = typeof input.command === "string" ? input.command.trim() : "";
+  if (!command) {
+    throw new Error("command is required");
+  }
+
+  const args = Array.isArray(input.args) ? input.args.map((value) => String(value)) : [];
+  const shell = parseOptionalBoolean(input.shell, !Array.isArray(input.args));
+  if (shell && args.length) {
+    throw new Error("Use command completo com shell=true ou defina shell=false para enviar args");
+  }
+
+  return {
+    title: String(input.title || command).trim().slice(0, 160) || command,
+    command,
+    args,
+    shell,
+    cwd: normalizeRelativePath(input.cwd || ""),
+    env: normalizeExecEnv(input.env),
+    stdin: input.stdin === undefined || input.stdin === null ? "" : String(input.stdin),
+    timeoutMs: clampExecTimeoutMs(input.timeout_ms)
+  };
+}
+
+function buildExecutionRequestSnapshot(payload, cwd) {
+  return {
+    title: payload.title,
+    command: payload.command,
+    args: payload.args,
+    shell: payload.shell,
+    cwd: cwd || ".",
+    timeout_ms: payload.timeoutMs,
+    stdin_bytes: Buffer.byteLength(payload.stdin || "", "utf8"),
+    env_keys: Object.keys(payload.env)
+  };
+}
+
+function buildExecutionMeta(payload, runId, cwd) {
+  return {
+    id: runId,
+    title: payload.title,
+    status: "running",
+    command: payload.command,
+    args: payload.args,
+    shell: payload.shell,
+    cwd: cwd || ".",
+    timeout_ms: payload.timeoutMs,
+    env_keys: Object.keys(payload.env),
+    request_path: executionRelativePath(runId, "request.json"),
+    result_path: executionRelativePath(runId, "result.json"),
+    stdout_path: executionRelativePath(runId, "stdout.log"),
+    stderr_path: executionRelativePath(runId, "stderr.log"),
+    pid: null,
+    exit_code: null,
+    signal: null,
+    error: null,
+    started_at: new Date().toISOString(),
+    finished_at: null,
+    duration_ms: null
+  };
+}
+
+function buildExecutionSummary(meta) {
+  return {
+    id: meta.id,
+    title: meta.title,
+    status: meta.status,
+    command: meta.command,
+    cwd: meta.cwd,
+    started_at: meta.started_at,
+    finished_at: meta.finished_at,
+    duration_ms: meta.duration_ms,
+    exit_code: meta.exit_code,
+    signal: meta.signal,
+    pid: meta.pid
+  };
+}
+
+async function persistExecutionSummary(user, summary) {
+  const state = await loadUserState(user);
+  const current = state[EXECUTION_STATE_KEY] && typeof state[EXECUTION_STATE_KEY] === "object"
+    ? state[EXECUTION_STATE_KEY]
+    : {};
+  const recent = Array.isArray(current.recent)
+    ? current.recent.filter((item) => item && item.id !== summary.id)
+    : [];
+
+  recent.unshift(summary);
+  state[EXECUTION_STATE_KEY] = {
+    last_run_id: summary.id,
+    updated_at: new Date().toISOString(),
+    recent: recent.slice(0, MAX_EXEC_HISTORY_ITEMS)
+  };
+  await saveUserState(user, state);
+}
+
+async function persistExecutionMeta(user, meta) {
+  const paths = executionPaths(user, meta.id);
+  await writeFile(paths.result, `${JSON.stringify(meta, null, 2)}\n`, "utf8");
+  await persistExecutionSummary(user, buildExecutionSummary(meta));
+}
+
+async function readExecutionMeta(user, runId) {
+  const paths = executionPaths(user, runId);
+  if (!existsSync(paths.result)) return null;
+  return JSON.parse(await readFile(paths.result, "utf8"));
+}
+
+function getActiveExecution(user, runId) {
+  const active = activeExecutions.get(runId);
+  if (!active || active.userId !== user.id) return null;
+  return active;
+}
+
+async function getExecutionMeta(user, runId) {
+  const active = getActiveExecution(user, runId);
+  if (active) return active.meta;
+  return readExecutionMeta(user, runId);
+}
+
+function closeWriteStream(stream) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    stream.once("finish", finish);
+    stream.once("error", finish);
+    stream.end();
+  });
+}
+
+async function readExecutionLog(logPath, tailBytes) {
+  if (!existsSync(logPath)) {
+    return { content: "", size: 0, truncated: false };
+  }
+  const buffer = await readFile(logPath);
+  const limit = clampExecLogTailBytes(tailBytes);
+  const truncated = buffer.length > limit;
+  const sliced = truncated ? buffer.subarray(buffer.length - limit) : buffer;
+  return {
+    content: sliced.toString("utf8"),
+    size: buffer.length,
+    truncated
+  };
+}
+
+async function listExecutionHistory(user, limit) {
+  await ensureUserDirs(user);
+  const entries = await readdir(userRunsDir(user), { withFileTypes: true });
+  const items = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const runId = normalizeRunId(entry.name);
+    if (!runId) continue;
+    try {
+      const meta = await readExecutionMeta(user, runId);
+      if (!meta) continue;
+      items.push(buildExecutionSummary(meta));
+    } catch (error) {
+      console.error(`Failed to load execution ${entry.name}:`, error.message);
+    }
+  }
+
+  items.sort((a, b) => {
+    const left = Date.parse(b.finished_at || b.started_at || 0);
+    const right = Date.parse(a.finished_at || a.started_at || 0);
+    return left - right;
+  });
+
+  return items.slice(0, clampExecHistoryLimit(limit));
+}
+
+async function createExecution(user, input) {
+  const payload = normalizeExecPayload(input);
+  const workdir = workspacePath(user, payload.cwd);
+  const runId = generateRunId();
+  const paths = executionPaths(user, runId);
+
+  await mkdir(paths.dir, { recursive: true });
+  await writeFile(
+    paths.request,
+    `${JSON.stringify(buildExecutionRequestSnapshot(payload, workdir.rel || "."), null, 2)}\n`,
+    "utf8"
+  );
+
+  let meta = buildExecutionMeta(payload, runId, workdir.rel || ".");
+  await persistExecutionMeta(user, meta);
+
+  const stdoutStream = createWriteStream(paths.stdout, { flags: "a" });
+  const stderrStream = createWriteStream(paths.stderr, { flags: "a" });
+
+  const child = payload.shell
+    ? spawn(payload.command, {
+      cwd: workdir.absolute,
+      env: { ...process.env, ...payload.env },
+      shell: true,
+      stdio: "pipe"
+    })
+    : spawn(payload.command, payload.args, {
+      cwd: workdir.absolute,
+      env: { ...process.env, ...payload.env },
+      shell: false,
+      stdio: "pipe"
+    });
+
+  meta = {
+    ...meta,
+    pid: child.pid ?? null
+  };
+
+  const active = {
+    userId: user.id,
+    child,
+    meta,
+    stdoutStream,
+    stderrStream,
+    timeoutHandle: null,
+    forceKillHandle: null,
+    statusOverride: null,
+    finalized: false
+  };
+  activeExecutions.set(runId, active);
+
+  const finalize = async ({ status, exitCode, signal, errorMessage = null }) => {
+    if (active.finalized) return;
+    active.finalized = true;
+    activeExecutions.delete(runId);
+    if (active.timeoutHandle) clearTimeout(active.timeoutHandle);
+    if (active.forceKillHandle) clearTimeout(active.forceKillHandle);
+
+    await Promise.all([
+      closeWriteStream(stdoutStream),
+      closeWriteStream(stderrStream)
+    ]);
+
+    const finishedAt = new Date().toISOString();
+    const startedAt = Date.parse(active.meta.started_at);
+    active.meta = {
+      ...active.meta,
+      status,
+      exit_code: typeof exitCode === "number" ? exitCode : null,
+      signal: signal || null,
+      error: errorMessage,
+      finished_at: finishedAt,
+      duration_ms: Number.isFinite(startedAt)
+        ? Math.max(0, Date.parse(finishedAt) - startedAt)
+        : null
+    };
+
+    await persistExecutionMeta(user, active.meta);
+  };
+
+  if (child.stdout) {
+    child.stdout.on("data", (chunk) => {
+      stdoutStream.write(chunk);
+    });
+  }
+
+  if (child.stderr) {
+    child.stderr.on("data", (chunk) => {
+      stderrStream.write(chunk);
+    });
+  }
+
+  child.on("error", (error) => {
+    void finalize({
+      status: active.statusOverride || "failed",
+      exitCode: null,
+      signal: null,
+      errorMessage: error.message
+    });
+  });
+
+  child.on("close", (code, signal) => {
+    void finalize({
+      status: active.statusOverride || (code === 0 ? "completed" : "failed"),
+      exitCode: code,
+      signal
+    });
+  });
+
+  if (child.stdin) {
+    try {
+      if (payload.stdin) child.stdin.write(payload.stdin);
+      child.stdin.end();
+    } catch {
+      child.stdin.destroy();
+    }
+  }
+
+  active.timeoutHandle = setTimeout(() => {
+    if (active.finalized) return;
+    active.statusOverride = "timed_out";
+    child.kill("SIGTERM");
+    active.forceKillHandle = setTimeout(() => {
+      if (!active.finalized) child.kill("SIGKILL");
+    }, 5000);
+  }, payload.timeoutMs);
+
+  return meta;
+}
+
+async function cancelExecution(user, runId) {
+  const active = getActiveExecution(user, runId);
+  if (!active) return null;
+  active.statusOverride = "cancelled";
+  const signaled = active.child.kill("SIGTERM");
+  active.forceKillHandle = setTimeout(() => {
+    if (!active.finalized) active.child.kill("SIGKILL");
+  }, 5000);
+  return {
+    ok: signaled,
+    run: active.meta
+  };
 }
 
 function nowMs() {
@@ -1115,6 +1534,31 @@ async function handleFsApi(req, res, url, user) {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/fs/download") {
+    const requestedPath = url.searchParams.get("path") || "";
+    if (!requestedPath) {
+      sendJson(res, 400, { error: "path is required" });
+      return;
+    }
+    const { rel, absolute } = workspacePath(user, requestedPath);
+    const stats = await lstat(absolute);
+    if (!stats.isFile()) {
+      sendJson(res, 400, { error: "Path is not a file" });
+      return;
+    }
+
+    const fileName = rel.split("/").filter(Boolean).at(-1) || "download";
+    const contentType = MIME_TYPES[extname(absolute).toLowerCase()] || "application/octet-stream";
+    res.writeHead(200, {
+      "Content-Type": contentType,
+      "Content-Length": stats.size,
+      "Content-Disposition": attachmentDisposition(fileName),
+      "Cache-Control": "no-store"
+    });
+    createReadStream(absolute).pipe(res);
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/fs/write") {
     const raw = await readRequestBody(req);
     const payload = raw ? JSON.parse(raw) : {};
@@ -1182,6 +1626,123 @@ async function handleFsApi(req, res, url, user) {
     const { rel, absolute } = workspacePath(user, requestedPath);
     await rm(absolute, { recursive: true, force: false });
     sendJson(res, 200, { ok: true, path: rel });
+    return;
+  }
+
+  sendJson(res, 405, { error: "Method not allowed" });
+}
+
+async function handleExecApi(req, res, url, user) {
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type"
+    });
+    res.end();
+    return;
+  }
+
+  if (req.method === "GET" && (url.pathname === "/api/exec" || url.pathname === "/api/exec/history")) {
+    sendJson(res, 200, {
+      items: await listExecutionHistory(user, url.searchParams.get("limit"))
+    });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/exec") {
+    const raw = await readRequestBody(req);
+    const payload = raw ? JSON.parse(raw) : {};
+    const run = await createExecution(user, payload);
+    sendJson(res, 202, { ok: true, run });
+    return;
+  }
+
+  if (!url.pathname.startsWith("/api/exec/")) {
+    sendJson(res, 404, { error: "Not found" });
+    return;
+  }
+
+  const parts = url.pathname.slice("/api/exec/".length).split("/").filter(Boolean);
+  const runId = normalizeRunId(parts[0]);
+  if (!runId) {
+    sendJson(res, 400, { error: "Invalid execution id" });
+    return;
+  }
+
+  if (parts.length === 1 && req.method === "GET") {
+    const run = await getExecutionMeta(user, runId);
+    if (!run) {
+      sendJson(res, 404, { error: "Execution not found" });
+      return;
+    }
+    sendJson(res, 200, {
+      run,
+      active: Boolean(getActiveExecution(user, runId))
+    });
+    return;
+  }
+
+  if (parts.length === 2 && parts[1] === "logs" && req.method === "GET") {
+    const run = await getExecutionMeta(user, runId);
+    if (!run) {
+      sendJson(res, 404, { error: "Execution not found" });
+      return;
+    }
+
+    const stream = String(url.searchParams.get("stream") || "both").trim().toLowerCase();
+    if (!["stdout", "stderr", "both"].includes(stream)) {
+      sendJson(res, 400, { error: "stream must be stdout, stderr or both" });
+      return;
+    }
+
+    const tailBytes = url.searchParams.get("tail_bytes");
+    const paths = executionPaths(user, runId);
+
+    if (stream === "stdout") {
+      sendJson(res, 200, {
+        id: runId,
+        active: Boolean(getActiveExecution(user, runId)),
+        stream,
+        ...(await readExecutionLog(paths.stdout, tailBytes))
+      });
+      return;
+    }
+
+    if (stream === "stderr") {
+      sendJson(res, 200, {
+        id: runId,
+        active: Boolean(getActiveExecution(user, runId)),
+        stream,
+        ...(await readExecutionLog(paths.stderr, tailBytes))
+      });
+      return;
+    }
+
+    sendJson(res, 200, {
+      id: runId,
+      active: Boolean(getActiveExecution(user, runId)),
+      stream,
+      stdout: await readExecutionLog(paths.stdout, tailBytes),
+      stderr: await readExecutionLog(paths.stderr, tailBytes)
+    });
+    return;
+  }
+
+  if (parts.length === 2 && parts[1] === "cancel" && req.method === "POST") {
+    const existing = await getExecutionMeta(user, runId);
+    if (!existing) {
+      sendJson(res, 404, { error: "Execution not found" });
+      return;
+    }
+
+    const result = await cancelExecution(user, runId);
+    if (!result) {
+      sendJson(res, 409, { error: "Execution is not active", run: existing });
+      return;
+    }
+
+    sendJson(res, 202, result);
     return;
   }
 
@@ -1294,6 +1855,10 @@ const server = createServer(async (req, res) => {
       }
       if (url.pathname === "/api/skills" || url.pathname.startsWith("/api/skills/")) {
         await handleSkillsApi(req, res, url, authUser);
+        return;
+      }
+      if (url.pathname === "/api/exec" || url.pathname.startsWith("/api/exec/")) {
+        await handleExecApi(req, res, url, authUser);
         return;
       }
       if (url.pathname.startsWith("/api/fs/")) {

@@ -3425,6 +3425,10 @@ return item;`
 
             function resolveTemplateValue(value, args, raw) {
                 if (typeof value === 'string') {
+                    const exact = value.match(/^\{\{(\w+)\}\}$/);
+                    if (exact && Object.prototype.hasOwnProperty.call(args || {}, exact[1])) {
+                        return args[exact[1]];
+                    }
                     return (raw ? resolveTemplateRaw : resolveTemplate)(value, args);
                 }
                 if (Array.isArray(value)) return value.map(v => resolveTemplateValue(v, args, raw));
@@ -3434,6 +3438,216 @@ return item;`
                     return out;
                 }
                 return value;
+            }
+
+            function sleep(ms) {
+                return new Promise(resolve => setTimeout(resolve, ms));
+            }
+
+            function defaultPluginAction(type) {
+                if (type === 'http') {
+                    return {
+                        type: 'http',
+                        method: 'GET',
+                        url: 'https://example.com?q={{input}}'
+                    };
+                }
+
+                if (type === 'exec') {
+                    return {
+                        type: 'exec',
+                        command: 'python',
+                        args: ['script.py', '{{input}}'],
+                        cwd: '',
+                        timeout_ms: 120000,
+                        wait: true,
+                        poll_interval_ms: 700,
+                        tail_bytes: 16000
+                    };
+                }
+
+                return {};
+            }
+
+            async function runExecPluginAction(name, action, args) {
+                const actionArgs = { ...(action.defaults || {}), ...(args || {}) };
+                const payload = {
+                    title: resolveTemplateValue(action.title || name, actionArgs, true),
+                    command: resolveTemplateValue(action.command, actionArgs, true),
+                    args: resolveTemplateValue(action.args, actionArgs, true),
+                    shell: resolveTemplateValue(action.shell, actionArgs, true),
+                    cwd: resolveTemplateValue(action.cwd, actionArgs, true),
+                    env: resolveTemplateValue(action.env, actionArgs, true),
+                    stdin: resolveTemplateValue(action.stdin, actionArgs, true),
+                    timeout_ms: resolveTemplateValue(action.timeout_ms, actionArgs, true)
+                };
+
+                if (!payload.command || typeof payload.command !== 'string') {
+                    return { error: `Exec plugin '${name}' sem command valido` };
+                }
+
+                if (action.pruneEmpty) {
+                    Object.keys(payload).forEach((key) => {
+                        if (payload[key] === '' || payload[key] === null || payload[key] === undefined) {
+                            delete payload[key];
+                        }
+                    });
+                }
+
+                try {
+                    const created = await fetchLocalJson('/api/exec', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    const run = created.run || null;
+                    if (!run?.id) {
+                        return { error: `Exec plugin '${name}' nao recebeu id de execucao` };
+                    }
+
+                    const wait = action.wait !== false && action.wait !== 'false';
+                    if (!wait) {
+                        return { ok: true, queued: true, run };
+                    }
+
+                    const pollIntervalMs = Math.max(150, Number.parseInt(String(action.poll_interval_ms ?? 700), 10) || 700);
+                    const maxPolls = Math.max(1, Number.parseInt(String(action.max_polls ?? 240), 10) || 240);
+                    let current = run;
+
+                    for (let index = 0; index < maxPolls; index += 1) {
+                        const status = await fetchLocalJson('/api/exec/' + encodeURIComponent(run.id));
+                        current = status.run || current;
+                        if (current.status !== 'running') break;
+                        await sleep(pollIntervalMs);
+                    }
+
+                    const artifacts = normalizeMessageFiles(
+                        resolveTemplateValue(action.artifacts || [], actionArgs, true),
+                        payload.cwd || ''
+                    );
+                    const includeLogs = String(action.include_logs || 'both').trim().toLowerCase();
+                    if (includeLogs === 'none') {
+                        return { ok: true, run: current, artifacts };
+                    }
+
+                    const tailBytes = Math.max(512, Number.parseInt(String(action.tail_bytes ?? 16000), 10) || 16000);
+                    const logs = await fetchLocalJson(
+                        '/api/exec/' + encodeURIComponent(run.id) + '/logs?stream=' + encodeURIComponent(includeLogs) + '&tail_bytes=' + tailBytes
+                    );
+
+                    return {
+                        ok: current?.status === 'completed',
+                        run: current,
+                        logs,
+                        artifacts
+                    };
+                } catch (e) {
+                    return { error: `Exec plugin '${name}': ${e.message}` };
+                }
+            }
+
+            function normalizeChatPath(value) {
+                return String(value || '')
+                    .replace(/\\/g, '/')
+                    .replace(/^\/+/, '')
+                    .replace(/\/+/g, '/')
+                    .trim();
+            }
+
+            function resolveChatPath(basePath, filePath) {
+                const base = normalizeChatPath(basePath);
+                const target = normalizeChatPath(filePath);
+                if (!target) return base;
+                const joined = `${base ? base + '/' : ''}${target}`;
+                const out = [];
+                joined.split('/').forEach(part => {
+                    if (!part || part === '.') return;
+                    if (part === '..') {
+                        if (out.length) out.pop();
+                        return;
+                    }
+                    out.push(part);
+                });
+                return out.join('/');
+            }
+
+            function fileIconForMessage(file) {
+                const mimeType = String(file?.mimeType || file?.type || '').toLowerCase();
+                const name = String(file?.name || file?.path || '').toLowerCase();
+                if (mimeType.startsWith('image/')) return '🖼️';
+                if (mimeType.includes('pdf') || name.endsWith('.pdf')) return '📄';
+                if (mimeType.includes('json') || name.endsWith('.json')) return '{}';
+                if (mimeType.includes('zip') || mimeType.includes('gzip') || /\.(zip|gz|tgz|7z|rar)$/.test(name)) return '🗜️';
+                if (mimeType.includes('audio') || /\.(mp3|wav|ogg|m4a)$/.test(name)) return '🎵';
+                if (mimeType.includes('video') || /\.(mp4|mov|webm|mkv)$/.test(name)) return '🎬';
+                return '📝';
+            }
+
+            function buildMessageFileDownloadUrl(file) {
+                if (file?.downloadUrl) return String(file.downloadUrl);
+                if (file?.path) return '/api/fs/download?path=' + encodeURIComponent(file.path);
+                if (file?.url) return String(file.url);
+                return '';
+            }
+
+            function normalizeMessageFiles(files, basePath) {
+                if (!Array.isArray(files)) return [];
+
+                return files
+                    .map(file => {
+                        const item = typeof file === 'string' ? { path: file } : file;
+                        if (!item || typeof item !== 'object') return null;
+
+                        const rawPath = item.path || item.workspacePath || item.relPath || '';
+                        const resolvedPath = rawPath ? resolveChatPath(basePath, rawPath) : '';
+                        const name = String(item.name || resolvedPath.split('/').filter(Boolean).at(-1) || 'arquivo').trim();
+                        const mimeType = String(item.mimeType || item.type || '').trim();
+                        const normalized = {
+                            name,
+                            mimeType
+                        };
+
+                        if (resolvedPath) normalized.path = resolvedPath;
+                        if (item.size !== undefined && item.size !== null) normalized.size = item.size;
+
+                        const downloadUrl = buildMessageFileDownloadUrl({ ...item, path: resolvedPath || item.path });
+                        if (downloadUrl) normalized.downloadUrl = downloadUrl;
+
+                        return normalized;
+                    })
+                    .filter(Boolean);
+            }
+
+            function mergeMessageFiles(existing, incoming) {
+                const merged = [];
+                const seen = new Set();
+
+                [...(Array.isArray(existing) ? existing : []), ...(Array.isArray(incoming) ? incoming : [])]
+                    .forEach(file => {
+                        if (!file || typeof file !== 'object') return;
+                        const key = file.path || file.downloadUrl || `${file.name || ''}:${file.mimeType || ''}`;
+                        if (!key || seen.has(key)) return;
+                        seen.add(key);
+                        merged.push(file);
+                    });
+
+                return merged;
+            }
+
+            function extractToolArtifacts(result, basePath) {
+                if (!result || typeof result !== 'object') return [];
+                const artifacts = Array.isArray(result.artifacts)
+                    ? result.artifacts
+                    : Array.isArray(result.files)
+                        ? result.files
+                        : Array.isArray(result.attachments)
+                            ? result.attachments
+                            : (result.artifact || result.file || result.attachment
+                                ? [result.artifact || result.file || result.attachment]
+                                : []);
+                const resolvedBasePath = basePath || result.artifact_base_path || result.artifactBasePath || result.basePath || result.cwd || '';
+                return normalizeMessageFiles(artifacts, resolvedBasePath);
             }
 
             function pruneEmptyFields(value) {
@@ -3542,6 +3756,9 @@ return item;`
                 }
 
                 const actionType = p.action?.type || 'code';
+                if (actionType === 'exec') {
+                    return runExecPluginAction(name, p.action || {}, args || {});
+                }
 
                 // ── HTTP action ──
                 if (actionType === 'http') {
@@ -3652,11 +3869,12 @@ return item;`
           <select id='pe-action-type' style='background:var(--s2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:2px 6px;font-size:11px;outline:none' onchange='onActionTypeChange()'>
             <option value='code' ${(!p.action || p.action.type === 'code') ? 'selected' : ''}>code (JS)</option>
             <option value='http' ${p.action?.type === 'http' ? 'selected' : ''}>http (fetch)</option>
+            <option value='exec' ${p.action?.type === 'exec' ? 'selected' : ''}>exec (server)</option>
           </select>
         </label>
-        <textarea class='editor-code' id='pe-action' style='min-height:90px;display:${p.action && p.action.type !== 'code' ? 'block' : 'none'}'>${esc(JSON.stringify(p.action || {}, null, 2))}</textarea>
+        <textarea class='editor-code' id='pe-action' style='min-height:90px;display:${p.action?.type && p.action.type !== 'code' ? 'block' : 'none'}'>${esc(JSON.stringify(p.action || {}, null, 2))}</textarea>
       </div>
-      <div class='editor-field full' id='pe-code-wrap' style='display:${!p.action || p.action.type === 'code' ? 'block' : 'none'}'>
+      <div class='editor-field full' id='pe-code-wrap' style='display:${!p.action?.type || p.action.type === 'code' ? 'block' : 'none'}'>
         <label>Código JS <span>disponível: args, convs, activeId</span></label>
         <textarea class='editor-code' id='pe-code' style='min-height:110px'>${esc(p.code || '// args disponível\nreturn { result: args.input };')}</textarea>
       </div>
@@ -3674,7 +3892,13 @@ return item;`
                 const t = document.getElementById('pe-action-type')?.value;
                 const actionEl = document.getElementById('pe-action');
                 const codeWrap = document.getElementById('pe-code-wrap');
-                if (actionEl) actionEl.style.display = t === 'http' ? 'block' : 'none';
+                if (actionEl) {
+                    actionEl.style.display = t === 'code' ? 'none' : 'block';
+                    const current = String(actionEl.value || '').trim();
+                    if (t !== 'code' && (!current || current === '{}' || current === '{\n\n}')) {
+                        actionEl.value = JSON.stringify(defaultPluginAction(t), null, 2);
+                    }
+                }
                 if (codeWrap) codeWrap.style.display = t === 'code' ? 'block' : 'none';
             }
 
@@ -3694,7 +3918,7 @@ return item;`
                     return;
                 }
                 const actionType = at?.value || 'code';
-                if (actionType === 'http') {
+                if (actionType === 'http' || actionType === 'exec') {
                     if (ae) { try { p.action = JSON.parse(ae.value); } catch (e) { toast('❌ Action JSON inválido: ' + e.message); return; } }
                     delete p.code;
                 } else {
@@ -3716,15 +3940,19 @@ return item;`
                 toast('✓ Plugin salvo!');
             }
 
-            function testPlugin(id) {
+            async function testPlugin(id) {
                 const p = plugins.find(x => x.id === id); if (!p) return;
                 const testArgs = {};
                 Object.entries(p.parameters?.properties || {}).forEach(([k, v]) => {
                     testArgs[k] = v.type === 'INTEGER' || v.type === 'NUMBER' ? 3 : v.type === 'BOOLEAN' ? false : 'test';
                 });
-                const result = executePlugin(p.name, testArgs);
                 const out = document.getElementById('test-out');
-                if (out) { out.style.display = 'block'; out.textContent = JSON.stringify(result, null, 2); }
+                if (out) {
+                    out.style.display = 'block';
+                    out.textContent = 'Executando...';
+                }
+                const result = await executePlugin(p.name, testArgs);
+                if (out) { out.textContent = JSON.stringify(result, null, 2); }
             }
 
             async function deletePlugin(id) {
@@ -3886,6 +4114,250 @@ return item;`
             }
 
             // ─ EXPORT / IMPORT ─
+            function importedTimestamp(value, fallback = Date.now()) {
+                if (typeof value === 'number' && Number.isFinite(value)) return value;
+                if (typeof value === 'string' && value.trim()) {
+                    const parsedNumber = Number(value);
+                    if (Number.isFinite(parsedNumber)) return parsedNumber;
+                    const parsedDate = Date.parse(value);
+                    if (Number.isFinite(parsedDate)) return parsedDate;
+                }
+                return fallback;
+            }
+
+            function stableHash(value) {
+                let hash = 2166136261;
+                const text = String(value || '');
+                for (let index = 0; index < text.length; index += 1) {
+                    hash ^= text.charCodeAt(index);
+                    hash = Math.imul(hash, 16777619);
+                }
+                return (hash >>> 0).toString(16).padStart(8, '0');
+            }
+
+            function messageFingerprint(message, index = 0) {
+                if (!message || typeof message !== 'object') return `m${index}:empty`;
+                const text = typeof message.text === 'string'
+                    ? message.text
+                    : (typeof message.content === 'string' ? message.content : '');
+                return JSON.stringify({
+                    index,
+                    role: message.role || '',
+                    ts: importedTimestamp(message.ts || message.created_at || message.updated_at, index),
+                    text: text.slice(0, 240),
+                    imgs: Array.isArray(message.imgs) ? message.imgs.length : 0,
+                    files: Array.isArray(message.files) ? message.files.length : 0
+                });
+            }
+
+            function buildConversationUid(conversation) {
+                if (!conversation || typeof conversation !== 'object') return `conv_${stableHash('empty')}`;
+
+                const existingUid = [conversation.uid, conversation.conversation_uid, conversation.conv_uid, conversation.import_uid]
+                    .find(value => typeof value === 'string' && value.trim());
+                if (existingUid) return existingUid.trim();
+
+                const title = typeof conversation.title === 'string' && conversation.title.trim()
+                    ? conversation.title.trim()
+                    : 'Conversa sem titulo';
+                const ts = importedTimestamp(conversation.ts || conversation.updated_at || conversation.created_at, 0);
+                const messages = Array.isArray(conversation.msgs)
+                    ? conversation.msgs
+                    : (Array.isArray(conversation.messages) ? conversation.messages : []);
+                const signature = JSON.stringify({
+                    title,
+                    ts,
+                    count: messages.length,
+                    messages: messages.map((message, index) => messageFingerprint(message, index))
+                });
+                return `conv_${stableHash(signature)}`;
+            }
+
+            function chooseConversationVersion(existingConversation, incomingConversation) {
+                const currentMessages = Array.isArray(existingConversation?.msgs)
+                    ? existingConversation.msgs
+                    : (Array.isArray(existingConversation?.messages) ? existingConversation.messages : []);
+                const nextMessages = Array.isArray(incomingConversation?.msgs)
+                    ? incomingConversation.msgs
+                    : (Array.isArray(incomingConversation?.messages) ? incomingConversation.messages : []);
+
+                if (nextMessages.length > currentMessages.length) return incomingConversation;
+                if (nextMessages.length < currentMessages.length) return existingConversation;
+
+                const currentTs = importedTimestamp(existingConversation?.ts || existingConversation?.updated_at || existingConversation?.created_at, 0);
+                const nextTs = importedTimestamp(incomingConversation?.ts || incomingConversation?.updated_at || incomingConversation?.created_at, 0);
+                return nextTs >= currentTs ? incomingConversation : existingConversation;
+            }
+
+            function newConversationUid() {
+                const uuid = globalThis.crypto?.randomUUID?.();
+                if (uuid) return `conv_${uuid}`;
+                return `conv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+            }
+
+            function normalizeImportedMessage(message, fallbackTs) {
+                if (!message || typeof message !== 'object') return null;
+                const role = message.role === 'model' || message.role === 'assistant' ? 'model' : 'user';
+                const text = typeof message.text === 'string'
+                    ? message.text
+                    : (typeof message.content === 'string' ? message.content : '');
+                return {
+                    ...message,
+                    role,
+                    text,
+                    ts: importedTimestamp(message.ts || message.created_at || message.updated_at, fallbackTs),
+                    imgs: Array.isArray(message.imgs) ? message.imgs.filter(Boolean) : [],
+                    files: Array.isArray(message.files) ? message.files.filter(Boolean) : []
+                };
+            }
+
+            function normalizeImportedConversation(conversation, idHint) {
+                if (!conversation || typeof conversation !== 'object') return null;
+                const now = Date.now();
+                const title = typeof conversation.title === 'string' && conversation.title.trim()
+                    ? conversation.title.trim()
+                    : `Conversa importada ${idHint}`;
+                const sourceMessages = Array.isArray(conversation.msgs)
+                    ? conversation.msgs
+                    : (Array.isArray(conversation.messages) ? conversation.messages : []);
+                const msgs = sourceMessages
+                    .map((message, index) => normalizeImportedMessage(message, importedTimestamp(conversation.ts, now) + index))
+                    .filter(Boolean);
+
+                const normalizedConversation = {
+                    ...conversation,
+                    title,
+                    msgs,
+                    ts: importedTimestamp(conversation.ts || conversation.updated_at || conversation.created_at, now)
+                };
+                normalizedConversation.uid = buildConversationUid(normalizedConversation);
+                return normalizedConversation;
+            }
+
+            function generateImportedConversationId(preferredId, reservedIds = null) {
+                const raw = String(preferredId || '')
+                    .trim()
+                    .replace(/[^a-zA-Z0-9_-]+/g, '_')
+                    .replace(/^_+|_+$/g, '')
+                    .slice(0, 80);
+                const base = raw || ('c' + Date.now());
+                let candidate = base;
+                let suffix = 1;
+                while (convs[candidate] || reservedIds?.has(candidate)) {
+                    candidate = `${base}_${suffix++}`;
+                }
+                return candidate;
+            }
+
+            function extractImportedConversations(payload) {
+                const source = payload && typeof payload === 'object' && !Array.isArray(payload)
+                    ? (payload.convs && typeof payload.convs === 'object'
+                        ? payload.convs
+                        : (payload.conversations && typeof payload.conversations === 'object'
+                            ? payload.conversations
+                            : payload))
+                    : payload;
+
+                const normalized = {};
+                const reservedIds = new Set(Object.keys(convs));
+                const uidToId = new Map();
+
+                Object.entries(convs).forEach(([id, conversation]) => {
+                    uidToId.set(buildConversationUid(conversation), id);
+                });
+
+                const pushConversation = (idHint, conversation) => {
+                    const normalizedConversation = normalizeImportedConversation(conversation, idHint);
+                    if (!normalizedConversation) return;
+                    const uid = buildConversationUid(normalizedConversation);
+                    const existingId = uidToId.get(uid);
+
+                    if (existingId) {
+                        const current = normalized[existingId] || convs[existingId];
+                        normalized[existingId] = chooseConversationVersion(current, normalizedConversation);
+                        normalized[existingId].uid = uid;
+                        return;
+                    }
+
+                    const id = generateImportedConversationId(
+                        idHint || normalizedConversation.id || normalizedConversation.title,
+                        reservedIds
+                    );
+                    normalizedConversation.uid = uid;
+                    normalized[id] = normalizedConversation;
+                    reservedIds.add(id);
+                    uidToId.set(uid, id);
+                };
+
+                if (Array.isArray(source)) {
+                    source.forEach((conversation, index) => {
+                        pushConversation(conversation?.id || `imported_${index + 1}`, conversation);
+                    });
+                    return normalized;
+                }
+
+                if (!source || typeof source !== 'object') return normalized;
+                Object.entries(source).forEach(([id, conversation]) => pushConversation(id, conversation));
+                return normalized;
+            }
+
+            function conversationRecord(value) {
+                return value && typeof value === 'object' ? value : {};
+            }
+
+            function conversationTitle(value, fallback = 'Conversa sem titulo') {
+                const conversation = conversationRecord(value);
+                return typeof conversation.title === 'string' && conversation.title.trim()
+                    ? conversation.title.trim()
+                    : fallback;
+            }
+
+            function conversationMessages(value) {
+                const conversation = conversationRecord(value);
+                return Array.isArray(conversation.msgs)
+                    ? conversation.msgs
+                    : (Array.isArray(conversation.messages) ? conversation.messages : []);
+            }
+
+            function conversationTs(value) {
+                const conversation = conversationRecord(value);
+                return importedTimestamp(conversation.ts || conversation.updated_at || conversation.created_at, 0);
+            }
+
+            function normalizeStoredConversations() {
+                const source = convs && typeof convs === 'object' && !Array.isArray(convs) ? convs : {};
+                const next = {};
+                const uidToId = new Map();
+                let changed = false;
+
+                Object.entries(source).forEach(([id, conversation]) => {
+                    const normalizedConversation = normalizeImportedConversation(conversation, id);
+                    if (!normalizedConversation) {
+                        changed = true;
+                        return;
+                    }
+                    const uid = normalizedConversation.uid;
+                    const existingId = uidToId.get(uid);
+                    if (existingId) {
+                        next[existingId] = chooseConversationVersion(next[existingId], normalizedConversation);
+                        if (activeId === id) activeId = existingId;
+                        changed = true;
+                        return;
+                    }
+
+                    uidToId.set(uid, id);
+                    next[id] = normalizedConversation;
+                    if (conversation?.uid !== normalizedConversation.uid
+                        || !Array.isArray(conversation?.msgs)
+                        || typeof conversation?.title !== 'string') {
+                        changed = true;
+                    }
+                });
+
+                convs = next;
+                return changed;
+            }
+
             function exportConvs() {
                 const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(convs));
                 const el = document.createElement('a');
@@ -3901,14 +4373,22 @@ return item;`
                 const file = e.target.files[0];
                 if (!file) return;
                 const reader = new FileReader();
-                reader.onload = function (evt) {
+                reader.onload = async function (evt) {
                     try {
-                        const imported = JSON.parse(evt.target.result);
+                        const imported = extractImportedConversations(JSON.parse(evt.target.result));
+                        const importedIds = Object.keys(imported);
+                        if (!importedIds.length) throw new Error('empty-import');
+
                         convs = { ...convs, ...imported };
+                        activeId = importedIds
+                            .sort((a, b) => (convs[b]?.ts || 0) - (convs[a]?.ts || 0))[0] || activeId;
                         saveConvs();
                         renderSidebar();
+                        renderChat();
+                        await window.__skillflowAccount?.syncState?.({ force: true });
                         toast('✓ Conversas importadas!');
                     } catch (err) {
+                        console.error('Falha ao importar conversas:', err);
                         toast('❌ Erro ao importar arquivo.');
                     }
                 };
@@ -3923,14 +4403,14 @@ return item;`
             }
             function newConversation() {
                 // Prevent creating multiple empty conversations
-                if (activeId && convs[activeId] && convs[activeId].msgs.length === 0) {
+                if (activeId && conversationMessages(convs[activeId]).length === 0) {
                     toast('💬 Já existe uma conversa vazia. Comece a digitar!');
                     document.getElementById('msg').focus();
                     closeSidebar();
                     return;
                 }
                 const id = 'c' + Date.now();
-                convs[id] = { title: 'Nova Conversa', msgs: [], ts: Date.now() };
+                convs[id] = { uid: newConversationUid(), title: 'Nova Conversa', msgs: [], ts: Date.now() };
                 saveConvs(); setActive(id);
             }
             function setActive(id) { activeId = id; renderSidebar(); renderChat(); if (window.innerWidth <= 768) closeSidebar(); }
@@ -3949,8 +4429,8 @@ return item;`
                 const list = document.getElementById('conv-list');
                 const q = document.getElementById('search-box').value.toLowerCase();
                 const ids = Object.keys(convs)
-                    .filter(id => convs[id].title.toLowerCase().includes(q))
-                    .sort((a, b) => convs[b].ts - convs[a].ts);
+                    .filter(id => conversationTitle(convs[id]).toLowerCase().includes(q))
+                    .sort((a, b) => conversationTs(convs[b]) - conversationTs(convs[a]));
 
                 if (ids.length === 0) {
                     list.innerHTML = `<div style="text-align:center; padding: 20px 10px; color:var(--muted); font-size: 13px;">Nenhuma conversa encontrada.</div>`;
@@ -3959,14 +4439,15 @@ return item;`
 
                 list.innerHTML = ids.map(id => `
     <div class="ci ${id === activeId ? 'active' : ''}" data-cid="${id}" onclick="setActive('${id}')" ondblclick="event.stopPropagation();renameConv('${id}')">
-      <span class="ci-title">${esc(convs[id].title)}</span>
+      <span class="ci-title">${esc(conversationTitle(convs[id]))}</span>
       <button class="ci-del" onclick="delConv('${id}',event)" title="Deletar">✕</button>
     </div>`).join('');
             }
 
             function renderChat() {
                 const c = document.getElementById('chat');
-                if (!activeId || !convs[activeId]?.msgs.length) {
+                const messages = activeId ? conversationMessages(convs[activeId]) : [];
+                if (!activeId || !messages.length) {
                     c.innerHTML = `<div id="empty">
       <div class="logo">✦</div>
       <h3>SkillFlow Chat OS</h3>
@@ -3980,7 +4461,7 @@ return item;`
     </div>`;
                     return;
                 }
-                c.innerHTML = convs[activeId].msgs.map((m, i) => msgHTML(m, i)).join('');
+                c.innerHTML = messages.map((m, i) => msgHTML(m, i)).join('');
                 scrollEnd();
                 // Use rAF to ensure DOM is painted before mermaid.run() reads element content
                 requestAnimationFrame(() => renderMermaidBlocks());
@@ -4040,6 +4521,25 @@ return item;`
                 renderImagePreview();
             }
 
+            function renderMessageFile(file, role) {
+                const href = buildMessageFileDownloadUrl(file);
+                const action = href
+                    ? `<a class="cp" href="${href}" download onclick="event.stopPropagation()">Baixar</a>`
+                    : '';
+                const subtitle = file?.path
+                    ? `<span style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(file.path)}</span>`
+                    : '';
+
+                return `<div class="file-preview">
+      <span class="file-icon">${fileIconForMessage(file)}</span>
+      <span style="display:flex;flex-direction:column;min-width:0;flex:1">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(file?.name || 'arquivo')}</span>
+        ${subtitle}
+      </span>
+      ${action}
+    </div>`;
+            }
+
             function msgHTML(m, i) {
                 const t = new Date(m.ts).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
                 let body = '';
@@ -4047,8 +4547,11 @@ return item;`
                 if (m.imgs && m.imgs.length > 0) {
                     body += `<div class="attached-imgs">${m.imgs.map(img => `<img src="data:${img.mimeType};base64,${img.data}">`).join('')}</div>`;
                 }
-                if (m.files && m.files.length > 0) {
+                if (false && m.files && m.files.length > 0) {
                     body += `<div class="attached-imgs">${m.files.map(f => `<div class="file-preview"><span class="file-icon">${f.type === 'application/pdf' ? '📄' : '📝'}</span><span>${esc(f.name)}</span></div>`).join('')}</div>`;
+                }
+                if (m.files && m.files.length > 0) {
+                    body += `<div class="attached-imgs">${m.files.map(f => renderMessageFile(f, m.role)).join('')}</div>`;
                 }
 
                 if (m.role === 'model') {
@@ -4348,6 +4851,7 @@ return item;`
                             const results = await Promise.all(
                                 fnCallParts.map(p => executePlugin(p.functionCall.name, p.functionCall.args || {}))
                             );
+                            const currentFiles = results.flatMap(result => extractToolArtifacts(result));
 
                             // Model parts: send EXACTLY as received from API (thoughtSignature preserved per part)
                             // CRITICAL for Gemini 3: thoughtSignature MUST stay on the functionCall part, NOT separate
@@ -4363,10 +4867,14 @@ return item;`
                                 { role: 'model', parts: modelParts },
                                 { role: 'user', parts: frParts }
                             ];
-                            return callAPI({ ...reqBody, contents: updatedContents }, bubEl, depth + 1);
+                            const nested = await callAPI({ ...reqBody, contents: updatedContents }, bubEl, depth + 1);
+                            return {
+                                ...nested,
+                                files: mergeMessageFiles(currentFiles, nested?.files || [])
+                            };
                         }
 
-                        return { full, tok, sig: textSig };
+                        return { full, tok, sig: textSig, files: [] };
                     }
 
                     document.getElementById(tid)?.remove();
@@ -4393,6 +4901,7 @@ return item;`
                     let full = '';
                     let tok = 0;
                     let sig = '';
+                    let modelFiles = [];
                     const codexTools = usingCodex ? buildCodexTools() : [];
 
                     async function callCodexAPI(inputItems, depth) {
@@ -4427,6 +4936,7 @@ return item;`
                             const results = await Promise.all(
                                 toolCalls.map(call => executePlugin(call.name, call.arguments || {}))
                             );
+                            const currentFiles = results.flatMap(result => extractToolArtifacts(result));
                             const assistantToolItems = outputItems.length
                                 ? outputItems
                                 : toolCalls.map(call => ({
@@ -4447,12 +4957,17 @@ return item;`
                                 }))
                             ];
 
-                            return callCodexAPI(nextInput, depth + 1);
+                            const nested = await callCodexAPI(nextInput, depth + 1);
+                            return {
+                                ...nested,
+                                files: mergeMessageFiles(currentFiles, nested?.files || [])
+                            };
                         }
 
                         return {
                             full: payload.output_text || '',
-                            tok: codexUsageTotalTokens(payload.usage)
+                            tok: codexUsageTotalTokens(payload.usage),
+                            files: []
                         };
                     }
 
@@ -4460,12 +4975,13 @@ return item;`
                         const codexResult = await callCodexAPI(buildCodexInputFromMessages(convs[activeId].msgs), 0);
                         full = codexResult.full || '';
                         tok = codexResult.tok || 0;
+                        modelFiles = codexResult.files || [];
                         if (full) {
                             bub.innerHTML = renderMarkdown(full);
                             scrollEnd();
                         }
                     } else {
-                        ({ full, tok, sig } = await callAPI(body, bub));
+                        ({ full, tok, sig, files: modelFiles } = await callAPI(body, bub));
                     }
 
                     // ─ FINALIZE ─
@@ -4482,6 +4998,7 @@ return item;`
                     }
                     if (tok) convs[activeId].msgs[mi].tok = tok;
                     if (sig) convs[activeId].msgs[mi].sig = sig;
+                    if (Array.isArray(modelFiles) && modelFiles.length) convs[activeId].msgs[mi].files = modelFiles;
 
                     const mt = document.getElementById(`mt${mi}`);
                     if (mt) {
@@ -4564,6 +5081,7 @@ return item;`
                 }
 
                 convs = JSON.parse(localStorage.getItem('gc_convs') || '{}');
+                if (normalizeStoredConversations()) saveConvs();
                 if (!activeId || !convs[activeId]) {
                     activeId = Object.keys(convs)
                         .sort((a, b) => (convs[b]?.ts || 0) - (convs[a]?.ts || 0))[0] || null;
