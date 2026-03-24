@@ -1,0 +1,370 @@
+/* ══════════════════════════════════════════════════
+   SKILLFLOW CHAT OS — DARK GLASSMORPHISM MOBILE
+   Injeta sobre o index.html sem quebrar o JS
+══════════════════════════════════════════════════ */
+
+/* ─ VARIÁVEIS GLASS ─ */
+:root[data-theme="dark"] {
+  --glass-bg:    rgba(15, 15, 22, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-blur:  blur(24px);
+  --glow-pink:   rgba(255, 179, 193, 0.18);
+  --glow-blue:   rgba(168, 213, 255, 0.18);
+  --gradient-accent: linear-gradient(135deg, #ffb3c1 0%, #a8d5ff 100%);
+  --surface: rgba(18, 18, 28, 0.82);
+  --mbubble: rgba(255, 255, 255, 0.04);
+  --ububble: rgba(168, 213, 255, 0.14);
+}
+
+/* ─ BODY GLOW ─ */
+body {
+  background:
+    radial-gradient(ellipse 60% 50% at 10% 0%,  rgba(255,179,193,0.18) 0%, transparent 55%),
+    radial-gradient(ellipse 50% 45% at 90% 5%,  rgba(168,213,255,0.18) 0%, transparent 50%),
+    radial-gradient(ellipse 40% 60% at 50% 100%, rgba(130,100,255,0.10) 0%, transparent 60%),
+    #08080f;
+}
+
+/* ─ TOPBAR GLASS ─ */
+#topbar {
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-bottom: 1px solid var(--glass-border);
+  box-shadow: 0 1px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.06);
+}
+
+/* ─ SIDEBAR GLASS ─ */
+#sidebar {
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-right: 1px solid var(--glass-border);
+  box-shadow: 4px 0 40px rgba(0,0,0,0.5);
+}
+
+/* ─ SETTINGS GLASS ─ */
+#cfg, #plugin-panel {
+  background: rgba(12, 12, 20, 0.88);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--glass-border);
+}
+
+/* ─ INPUT BAR GLASS ─ */
+#ibar {
+  background: rgba(18, 18, 30, 0.78);
+  backdrop-filter: blur(28px);
+  -webkit-backdrop-filter: blur(28px);
+  border: 1px solid rgba(255,255,255,0.09);
+  box-shadow:
+    0 8px 32px rgba(0,0,0,0.45),
+    inset 0 1px 0 rgba(255,255,255,0.07),
+    0 0 0 0.5px rgba(168,213,255,0.10);
+  border-radius: 20px;
+}
+
+/* ─ CHAT BUBBLES ─ */
+.user .bub {
+  background: linear-gradient(135deg, rgba(168,213,255,0.16), rgba(168,213,255,0.08));
+  border: 1px solid rgba(168,213,255,0.18);
+  box-shadow: 0 2px 14px rgba(168,213,255,0.07);
+  border-radius: 18px;
+  border-top-right-radius: 5px;
+}
+
+.model .bub {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.07);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.2);
+  border-radius: 18px;
+  border-top-left-radius: 5px;
+}
+
+/* ─ AVATAR GLOW ─ */
+.model .av {
+  background: var(--gradient-accent);
+  box-shadow: 0 0 14px rgba(255,179,193,0.35), 0 0 28px rgba(168,213,255,0.2);
+}
+
+/* ─ SEND BUTTON GLASS ─ */
+#send-btn {
+  background: linear-gradient(135deg, #ffb3c1 0%, #a8d5ff 100%);
+  color: #0a0a14;
+  font-weight: 700;
+  box-shadow: 0 4px 18px rgba(255,179,193,0.35), 0 0 0 1px rgba(255,255,255,0.12);
+  border-radius: 12px;
+}
+
+#send-btn:hover {
+  box-shadow: 0 6px 24px rgba(168,213,255,0.4), 0 0 0 1px rgba(255,255,255,0.18);
+  transform: scale(1.06);
+  background: linear-gradient(135deg, #ffc7d4 0%, #bde2ff 100%);
+}
+
+/* ─ TOAST GLASS ─ */
+#toast {
+  background: rgba(20, 20, 32, 0.92);
+  border: 1px solid var(--glass-border);
+  color: #fff;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.45);
+}
+
+/* ─ TYPING INDICATOR ─ */
+.typing {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--glass-border);
+  border-radius: 18px;
+  border-top-left-radius: 5px;
+}
+
+.typing span {
+  background: linear-gradient(135deg, #ffb3c1, #a8d5ff);
+}
+
+/* ─ THINKING INDICATOR GLASS ─ */
+.thinking-indicator {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(168,213,255,0.14);
+  border-radius: 18px;
+  border-top-left-radius: 5px;
+}
+
+/* ─ SELECTS / INPUTS GLASS ─ */
+.sel, .inp, input[type=number], textarea.ta {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.09);
+  backdrop-filter: blur(8px);
+}
+
+.sel:focus, .inp:focus, input[type=number]:focus, textarea.ta:focus {
+  border-color: rgba(255,179,193,0.5);
+  box-shadow: 0 0 0 3px rgba(255,179,193,0.08);
+}
+
+/* ─ SCROLLBAR GLASS ─ */
+::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.1);
+  border-radius: 4px;
+}
+
+/* ─ EMPTY STATE ─ */
+#empty .logo {
+  filter: drop-shadow(0 0 32px rgba(255,179,193,0.4)) drop-shadow(0 0 60px rgba(168,213,255,0.25));
+}
+
+/* ══ MOBILE OVERRIDES (max 768px) ══ */
+@media (max-width: 768px) {
+
+  /* Header reorganizado — logo + modelo numa linha, API key oculta por padrão */
+  #topbar {
+    padding: 8px 10px;
+    gap: 6px;
+    flex-wrap: nowrap;
+    min-height: 52px;
+  }
+
+  /* API Key esconde label e comprime */
+  #topbar .tb-grp:has(#api-in) label {
+    display: none;
+  }
+  #api-in {
+    width: 0;
+    min-width: 0;
+    padding: 0;
+    border: none;
+    opacity: 0;
+    pointer-events: none;
+    position: absolute;
+  }
+
+  /* Modelo — exibe só o valor, sem label */
+  #topbar .tb-grp:has(#model-sel) label {
+    display: none;
+  }
+  #model-sel {
+    max-width: 160px;
+    font-size: 12px;
+    padding: 6px 8px;
+  }
+
+  /* Botões topbar menores */
+  #cfg-btn, #plugin-btn {
+    padding: 6px 8px;
+    font-size: 11px;
+  }
+
+  /* Theme btn compact */
+  #theme-btn {
+    padding: 6px 8px;
+    font-size: 13px;
+  }
+
+  /* ─ INPUT BAR MOBILE ─ */
+  #ibar {
+    padding: 8px 10px;
+    gap: 6px;
+    border-radius: 18px;
+  }
+
+  /* Live btn comprime no mobile */
+  #live-btn {
+    font-size: 11px;
+    padding: 5px 7px;
+  }
+
+  /* Textarea maior no mobile */
+  #msg {
+    font-size: 16px; /* evita zoom iOS */
+    padding: 6px 0;
+  }
+
+  /* Botões de ação no input bar */
+  #attach-btn, #mic-btn {
+    width: 36px;
+    height: 36px;
+    font-size: 17px;
+  }
+
+  #send-btn, #stop-btn {
+    width: 38px;
+    height: 38px;
+    font-size: 16px;
+    border-radius: 11px;
+  }
+
+  /* Chat padding menor */
+  #chat {
+    padding: 14px 10px;
+    gap: 10px;
+  }
+
+  /* Bubbles no mobile */
+  .bub {
+    font-size: 14px;
+    padding: 10px 13px;
+    max-width: calc(100vw - 80px);
+  }
+
+  /* Avatar menor */
+  .av {
+    width: 28px;
+    height: 28px;
+    font-size: 12px;
+  }
+
+  /* Imagem preview no input */
+  .attached-imgs img {
+    max-width: 140px;
+    max-height: 140px;
+  }
+
+  /* Código no mobile: scroll horizontal limpo */
+  .bub pre {
+    font-size: 12px;
+    padding: 10px;
+  }
+
+  /* Toast posição correta acima do teclado */
+  #toast {
+    bottom: 100px;
+  }
+
+  /* Mic status */
+  #mic-status {
+    bottom: 96px;
+  }
+
+  /* TTS bar */
+  #tts-bar {
+    bottom: 92px;
+    right: 10px;
+    left: 10px;
+    right: auto;
+    max-width: calc(100vw - 20px);
+  }
+
+  /* Settings panel ocupa tela cheia no mobile */
+  #cfg-body {
+    gap: 12px;
+    padding: 0 12px 14px;
+  }
+
+  .sg {
+    min-width: 120px;
+  }
+
+  /* Plugin panel mobile */
+  #plugin-panel {
+    max-height: 60vh;
+  }
+
+  /* Conversation list items — dedos maiores */
+  .ci {
+    padding: 11px 12px;
+    font-size: 13.5px;
+    margin-bottom: 3px;
+  }
+
+  /* Botões de ação na sidebar */
+  .action-btn {
+    padding: 9px;
+    font-size: 12px;
+  }
+
+  /* Empty state menor */
+  #empty .logo {
+    font-size: 44px;
+  }
+
+  #empty h3 {
+    font-size: 18px;
+  }
+
+  #empty p {
+    font-size: 13.5px;
+  }
+
+  /* Live HUD no mobile */
+  #live-hud {
+    top: 58px;
+    font-size: 12px;
+    padding: 6px 14px;
+  }
+
+  /* Mermaid container no mobile */
+  .mermaid-body {
+    padding: 10px 8px;
+    overflow-x: scroll;
+  }
+
+  /* Code header no mobile */
+  .code-header {
+    font-size: 10px;
+  }
+
+  /* Meta (timestamp/tokens) compacto */
+  .meta {
+    font-size: 10px;
+  }
+}
+
+/* ── GLASS SHIMMER ENTRY ANIMATION ── */
+@keyframes glassIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+    filter: blur(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+.row.animate-in {
+  animation: glassIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
