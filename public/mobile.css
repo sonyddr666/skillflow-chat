@@ -368,3 +368,121 @@ body {
 .row.animate-in {
   animation: glassIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
+
+/* ══ SKELETON LOADING (THINKING) ══ */
+.skeleton-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+}
+.skeleton-line {
+  height: 12px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, rgba(255,255,255,0.04) 25%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.04) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ══ RETRY BUTTON STYLE ══ */
+.retry-btn {
+  align-self: flex-start;
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--danger);
+  background: transparent;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 12px;
+  transition: all .2s;
+}
+.retry-btn:hover {
+  background: rgba(255,80,80,0.1);
+}
+
+/* ══ MOBILE ACCOUNT + TOPBAR CLEANUP ══ */
+@media (max-width: 768px) {
+  /* Account shell — compactar */
+  #account-shell {
+    width: auto !important;
+    gap: 6px;
+    padding: 0;
+    flex-wrap: nowrap !important;
+  }
+  #account-pill {
+    padding: 0 8px;
+    height: 28px;
+    font-size: 11px;
+    gap: 4px;
+  }
+  #account-pill strong {
+    font-size: 11px;
+  }
+  #account-sync-status {
+    font-size: 9px;
+    padding: 1px 6px;
+  }
+  #account-logout {
+    height: 28px;
+    padding: 0 10px;
+    font-size: 11px;
+    width: auto !important;
+  }
+
+  /* Theme btn compacto */
+  #theme-btn {
+    padding: 4px 6px;
+    font-size: 14px;
+    min-width: 28px;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Topbar — tudo numa linha limpa */
+  #topbar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    padding: 6px 8px;
+    gap: 4px;
+    min-height: 44px;
+  }
+
+  /* Input bar — mais espaço pro textarea */
+  #ibar {
+    padding: 6px 8px;
+    gap: 4px;
+    border-radius: 16px;
+  }
+  #msg {
+    min-height: 34px;
+    flex: 1 1 0;
+    font-size: 16px;
+  }
+  /* Botões de ação menores no input */
+  #attach-btn, #mic-btn {
+    width: 32px;
+    height: 32px;
+    font-size: 15px;
+    flex-shrink: 0;
+  }
+  #send-btn, #stop-btn {
+    width: 34px;
+    height: 34px;
+    font-size: 14px;
+    border-radius: 10px;
+    flex-shrink: 0;
+  }
+  #live-btn {
+    font-size: 10px;
+    padding: 4px 6px;
+    flex-shrink: 0;
+  }
+}

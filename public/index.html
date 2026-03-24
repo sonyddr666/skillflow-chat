@@ -4722,7 +4722,10 @@ return item;`
                 chat.insertAdjacentHTML('beforeend',
                     isThinking
                         ? `<div id="${tid}" class="row model animate-in"><div class="av">✦</div>
-     <div class="thinking-indicator"><span class="brain">🧠</span> Pensando<span class="thinking-dots"><span></span><span></span><span></span></span></div></div>`
+     <div style="flex:1;max-width:calc(100% - 42px)">
+       <div class="thinking-indicator"><span class="brain">🧠</span> Pensando<span class="thinking-dots"><span></span><span></span><span></span></span></div>
+       <div class="skeleton-lines"><div class="skeleton-line" style="width:85%"></div><div class="skeleton-line" style="width:60%"></div><div class="skeleton-line" style="width:72%"></div></div>
+     </div></div>`
                         : `<div id="${tid}" class="row model animate-in"><div class="av">✦</div>
      <div class="typing"><span></span><span></span><span></span></div></div>`);
                 scrollEnd();
@@ -4778,9 +4781,16 @@ return item;`
                     : contents;
 
                 const body = { contents: trimmedContents, generationConfig: genCfg, tools: buildTools() };
-                if (sysp) body.systemInstruction = { parts: [{ text: sysp }] };
+                const hasTools = body.tools?.length > 0 || body.tools?.[0]?.functionDeclarations?.length > 0;
+                const skillsInstruction = hasTools
+                    ? '\n\n[REGRA OPERACIONAL] Você tem ferramentas (skills) disponíveis. SEMPRE verifique se alguma skill resolve a pergunta ANTES de responder com texto. Use function calling em vez de verbalizar ações. Só responda verbalmente se nenhuma skill for adequada.'
+                    : '';
+                const fullSysp = (sysp || '') + skillsInstruction;
+                if (fullSysp.trim()) body.systemInstruction = { parts: [{ text: fullSysp }] };
 
                 ctrl = new AbortController();
+                const thinkTimeout = isThinking ? 180000 : 60000;
+                const autoAbort = setTimeout(() => { if (ctrl) ctrl.abort(); }, thinkTimeout);
                 try {
 
                     async function callAPI(reqBody, bubEl, depth) {
@@ -5019,17 +5029,24 @@ return item;`
                         const last = convs[activeId]?.msgs.at(-1);
                         if (last?.role === 'model' && !last.text) convs[activeId].msgs.pop();
                     } else {
+                        const friendlyMsg = err.message?.includes('Failed to fetch')
+                            ? '🌐 Sem conexão ou o servidor demorou demais. Tente de novo.'
+                            : err.message?.includes('timeout') || err.message?.includes('aborted')
+                            ? '⏱ O modelo demorou para responder. Tente novamente ou reduza o Thinking Level.'
+                            : err.message;
                         chat.insertAdjacentHTML('beforeend', `
         <div class="row model">
           <div class="av" style="background:#4a0000; color: #fff;">⚠</div>
-          <div class="bub" style="border-color:var(--danger);color:var(--danger)">
-            <strong>Erro:</strong> ${esc(err.message)}
+          <div class="bub" style="border-color:var(--danger);color:var(--danger);display:flex;flex-direction:column;gap:8px">
+            <span>${esc(friendlyMsg)}</span>
+            <button class="retry-btn" onclick="send()">🔄 Tentar novamente</button>
           </div>
         </div>`);
-                        toast('❌ ' + err.message.slice(0, 70));
+                        toast('❌ ' + friendlyMsg.slice(0, 70));
                     }
                     saveConvs();
                 } finally {
+                    clearTimeout(autoAbort);
                     document.getElementById('send-btn').disabled = false;
                     document.getElementById('stop-btn').style.display = 'none';
                     ctrl = null; renderSidebar(); scrollEnd();
