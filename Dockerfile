@@ -5,8 +5,7 @@ WORKDIR /app
 COPY package.json ./
 COPY server.js ./
 COPY public ./public
-COPY skills ./skills
-COPY workspace ./workspace
+RUN mkdir -p /app/skills /app/workspace
 
 EXPOSE 9321
 
