@@ -5242,9 +5242,16 @@ return item;`
 
                 recognition.onend = () => {
                     if (!isListening) return;
-                    isListening = false;
-                    document.getElementById('mic-btn').classList.remove('listening');
-                    document.getElementById('mic-status').classList.remove('on');
+                    // Android Chrome mata continuous recognition após silêncio — auto-restart
+                    setTimeout(() => {
+                        if (isListening && recognition) {
+                            try { recognition.start(); } catch (_) {
+                                isListening = false;
+                                document.getElementById('mic-btn').classList.remove('listening');
+                                document.getElementById('mic-status').classList.remove('on');
+                            }
+                        }
+                    }, 300);
                 };
 
                 return recognition;
@@ -5625,7 +5632,16 @@ return item;`
                 r.onend = () => {
                     liveRecognitionActive = false;
                     if (!liveMode || liveIgnoreSTT) return;
-                    liveSetHUD('idle', 'Microfone pausado');
+                    // Android Chrome mata continuous recognition — auto-restart
+                    setTimeout(() => {
+                        if (liveMode && !liveIgnoreSTT && liveRecognition) {
+                            try { liveRecognition.start(); } catch (_) {
+                                liveSetHUD('idle', 'Microfone pausado');
+                            }
+                        } else {
+                            liveSetHUD('idle', 'Microfone pausado');
+                        }
+                    }, 300);
                 };
 
                 r.onstart = () => {
