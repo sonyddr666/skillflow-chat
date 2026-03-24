@@ -1,0 +1,581 @@
+{
+  "gc_plugins": [
+    {
+      "id": "bi_history",
+      "builtin": true,
+      "enabled": true,
+      "name": "get_history",
+      "description": "Recupera mensagens anteriores desta conversa. Use quando o usuário referenciar algo dito antes que não está no contexto atual.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "turns": {
+            "type": "INTEGER",
+            "description": "Turnos a recuperar (1-100)"
+          },
+          "from_start": {
+            "type": "BOOLEAN",
+            "description": "Se true retorna do início"
+          }
+        },
+        "required": [
+          "turns"
+        ]
+      }
+    },
+    {
+      "id": "bi_time",
+      "builtin": true,
+      "enabled": true,
+      "name": "get_current_time",
+      "description": "Retorna data e hora atual do sistema do usuário.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "timezone": {
+            "type": "STRING",
+            "description": "Fuso IANA ex: America/Sao_Paulo"
+          }
+        }
+      }
+    },
+    {
+      "id": "bi_stats",
+      "builtin": true,
+      "enabled": true,
+      "name": "get_conversation_stats",
+      "description": "Estatísticas da conversa: mensagens, tokens usados, imagens enviadas.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {}
+      }
+    },
+    {
+      "id": "bi_search",
+      "builtin": true,
+      "enabled": true,
+      "name": "search_conversation",
+      "description": "Busca mensagens na conversa atual que contenham texto específico.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "query": {
+            "type": "STRING",
+            "description": "Texto a buscar"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    {
+      "id": "bi_calc",
+      "builtin": true,
+      "enabled": true,
+      "name": "calculate",
+      "description": "Avalia expressões matemáticas precisas. Use para cálculos numéricos.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "expression": {
+            "type": "STRING",
+            "description": "Expressão JS ex: 2+2*10, Math.sqrt(144)"
+          }
+        },
+        "required": [
+          "expression"
+        ]
+      }
+    },
+    {
+      "id": "bi_http_read",
+      "builtin": false,
+      "enabled": true,
+      "icon": "🌐",
+      "name": "http_request",
+      "description": "Acessa uma URL e lê o conteúdo da página em formato Markdown limpo. Use para ler artigos, posts, documentação ou extrair links de uma página para continuar navegando.",
+      "parameters": {
+        "url": {
+          "type": "STRING",
+          "description": "A URL completa para acessar (ex: https://exemplo.com/post)",
+          "required": true
+        }
+      },
+      "action": {
+        "type": "http",
+        "method": "GET",
+        "url": "https://r.jina.ai/{{url}}",
+        "headers": {
+          "X-With-Links-Summary": "true",
+          "X-Return-Format": "markdown",
+          "Accept": "text/plain"
+        }
+      }
+    },
+    {
+      "id": "wf_ghost_search",
+      "builtin": false,
+      "enabled": true,
+      "icon": "👻",
+      "name": "ghost_search",
+      "description": "Pesquisa na web via Ghost Search API (api.ghost1.cloud). Use para internet, notícias e research com filtros de modelo, foco, tempo e citações.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "query": {
+            "type": "STRING",
+            "description": "Pergunta ou busca principal"
+          },
+          "model": {
+            "type": "STRING",
+            "description": "Modelo opcional. Ex: best, claude-4.6-opus"
+          },
+          "focus": {
+            "type": "STRING",
+            "description": "Foco opcional: web, academic, youtube, reddit, wolfram"
+          },
+          "time_range": {
+            "type": "STRING",
+            "description": "Janela opcional: all, day, week, month, year"
+          },
+          "citation_mode": {
+            "type": "STRING",
+            "description": "Modo de citação opcional: markdown, default, clean"
+          },
+          "user_id": {
+            "type": "STRING",
+            "description": "ID opcional do usuário ou conversa"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "action": {
+        "type": "http",
+        "method": "POST",
+        "url": "/api/ghost-search",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "defaults": {
+          "model": "best",
+          "focus": "web",
+          "time_range": "all",
+          "citation_mode": "markdown"
+        },
+        "pruneEmpty": true,
+        "body": {
+          "query": "{{query}}",
+          "model": "{{model}}",
+          "focus": "{{focus}}",
+          "time_range": "{{time_range}}",
+          "citation_mode": "{{citation_mode}}",
+          "user_id": "{{user_id}}"
+        }
+      }
+    },
+    {
+      "id": "sv_fs_list",
+      "builtin": false,
+      "enabled": true,
+      "icon": "📁",
+      "name": "server_list_files",
+      "description": "Lista arquivos e pastas da workspace do servidor via backend local. Isso navega somente a workspace do usuario e nao o registro real de skills da plataforma.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "path": {
+            "type": "STRING",
+            "description": "Caminho relativo dentro da workspace. Ex: \"\", docs, src/components"
+          }
+        }
+      },
+      "action": {
+        "type": "http",
+        "method": "GET",
+        "url": "/api/fs/list?path={{path}}"
+      }
+    },
+    {
+      "id": "sv_fs_read",
+      "builtin": false,
+      "enabled": true,
+      "icon": "📄",
+      "name": "server_read_file",
+      "description": "Lê um arquivo de texto da workspace do servidor via backend local. Use para abrir, inspecionar e reutilizar arquivos existentes no deploy.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "path": {
+            "type": "STRING",
+            "description": "Caminho relativo do arquivo. Ex: notes/todo.md"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "action": {
+        "type": "http",
+        "method": "GET",
+        "url": "/api/fs/read?path={{path}}"
+      }
+    },
+    {
+      "id": "sv_fs_write",
+      "builtin": false,
+      "enabled": true,
+      "icon": "📝",
+      "name": "server_write_file",
+      "description": "Cria ou edita um arquivo de texto na workspace do servidor via backend local. Isso cria arquivo real, mas nao registra uma skill da plataforma por si so.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "path": {
+            "type": "STRING",
+            "description": "Caminho relativo do arquivo a criar ou editar"
+          },
+          "content": {
+            "type": "STRING",
+            "description": "Conteúdo completo a salvar no arquivo"
+          },
+          "create_dirs": {
+            "type": "BOOLEAN",
+            "description": "Cria pastas pai automaticamente quando necessário"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ]
+      },
+      "action": {
+        "type": "http",
+        "method": "POST",
+        "url": "/api/fs/write",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "defaults": {
+          "create_dirs": true
+        },
+        "body": {
+          "path": "{{path}}",
+          "content": "{{content}}",
+          "create_dirs": "{{create_dirs}}"
+        }
+      }
+    },
+    {
+      "id": "sv_fs_mkdir",
+      "builtin": false,
+      "enabled": true,
+      "icon": "📂",
+      "name": "server_make_directory",
+      "description": "Cria uma pasta na workspace do servidor via backend local. Isso so cria diretorio na workspace; nao cria uma skill registrada.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "path": {
+            "type": "STRING",
+            "description": "Caminho relativo da pasta. Ex: docs/releases"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "action": {
+        "type": "http",
+        "method": "POST",
+        "url": "/api/fs/mkdir",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "path": "{{path}}"
+        }
+      }
+    },
+    {
+      "id": "sv_fs_rename",
+      "builtin": false,
+      "enabled": true,
+      "icon": "✏️",
+      "name": "server_rename_path",
+      "description": "Renomeia ou move um arquivo/pasta dentro da workspace do servidor via backend local.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "path": {
+            "type": "STRING",
+            "description": "Caminho atual"
+          },
+          "next_path": {
+            "type": "STRING",
+            "description": "Novo caminho relativo"
+          }
+        },
+        "required": [
+          "path",
+          "next_path"
+        ]
+      },
+      "action": {
+        "type": "http",
+        "method": "POST",
+        "url": "/api/fs/rename",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "path": "{{path}}",
+          "next_path": "{{next_path}}"
+        }
+      }
+    },
+    {
+      "id": "sv_fs_delete",
+      "builtin": false,
+      "enabled": true,
+      "icon": "🗑️",
+      "name": "server_delete_path",
+      "description": "Apaga um arquivo ou pasta da workspace do servidor via backend local. Use com cuidado para exclusões reais no deploy.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "path": {
+            "type": "STRING",
+            "description": "Caminho relativo do arquivo ou pasta a apagar"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "action": {
+        "type": "http",
+        "method": "DELETE",
+        "url": "/api/fs/delete?path={{path}}"
+      }
+    },
+    {
+      "id": "wf_context",
+      "builtin": true,
+      "enabled": true,
+      "icon": "🗂️",
+      "name": "get_workspace_context",
+      "description": "Retorna o contexto real do usuario atual: conversa, modelo, skills registradas, skills habilitadas e pastas skill_* encontradas na workspace.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "path": {
+            "type": "STRING",
+            "description": "Caminho opcional dentro da workspace para procurar skill_*"
+          }
+        }
+      }
+    },
+    {
+      "id": "wf_memory_set",
+      "builtin": false,
+      "enabled": true,
+      "icon": "🧠",
+      "name": "save_user_memory",
+      "description": "Salva uma memória curta ou longa do usuário em LocalStorage para preferências, contexto recorrente e projeto.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "key": {
+            "type": "STRING",
+            "description": "Chave da memória"
+          },
+          "value": {
+            "type": "STRING",
+            "description": "Valor a ser salvo"
+          },
+          "namespace": {
+            "type": "STRING",
+            "description": "Agrupador opcional, ex: user, workspace, project"
+          }
+        },
+        "required": [
+          "key",
+          "value"
+        ]
+      },
+      "code": "\nconst bag = JSON.parse(localStorage.getItem('gc_user_memory') || '{}');\nconst ns = args.namespace || 'user';\nif (!bag[ns]) bag[ns] = {};\nbag[ns][args.key] = { value: args.value, updated_at: new Date().toISOString() };\nlocalStorage.setItem('gc_user_memory', JSON.stringify(bag));\nreturn { ok: true, namespace: ns, key: args.key, stored: bag[ns][args.key] };"
+    },
+    {
+      "id": "wf_memory_get",
+      "builtin": false,
+      "enabled": true,
+      "icon": "📚",
+      "name": "read_user_memory",
+      "description": "Lê memórias salvas do usuário ou do projeto para personalização e continuidade.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "namespace": {
+            "type": "STRING",
+            "description": "Agrupador opcional, ex: user, workspace, project"
+          },
+          "key": {
+            "type": "STRING",
+            "description": "Chave específica opcional"
+          }
+        }
+      },
+      "code": "\nconst bag = JSON.parse(localStorage.getItem('gc_user_memory') || '{}');\nconst ns = args.namespace || 'user';\nif (!bag[ns]) return { namespace: ns, entries: {} };\nif (args.key) return { namespace: ns, key: args.key, value: bag[ns][args.key] ?? null };\nreturn { namespace: ns, entries: bag[ns] };"
+    },
+    {
+      "id": "wf_approval",
+      "builtin": false,
+      "enabled": true,
+      "icon": "🛡️",
+      "name": "request_human_approval",
+      "description": "Registra uma aprovação humana pendente para ações sensíveis como publicar, deletar, pagar ou enviar para sistemas externos.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "action": {
+            "type": "STRING",
+            "description": "Ação que precisa de aprovação"
+          },
+          "reason": {
+            "type": "STRING",
+            "description": "Justificativa e risco da ação"
+          },
+          "risk": {
+            "type": "STRING",
+            "description": "Nível de risco, ex: baixo, médio, alto"
+          }
+        },
+        "required": [
+          "action",
+          "reason"
+        ]
+      },
+      "code": "\nconst approvals = JSON.parse(localStorage.getItem('gc_pending_approvals') || '[]');\nconst item = {\n  id: 'appr_' + Date.now(),\n  action: args.action,\n  reason: args.reason,\n  risk: args.risk || 'médio',\n  status: 'pending',\n  created_at: new Date().toISOString(),\n  conversation: convs[activeId]?.title || ''\n};\napprovals.unshift(item);\nlocalStorage.setItem('gc_pending_approvals', JSON.stringify(approvals));\nreturn item;"
+    },
+    {
+      "id": "wf_market",
+      "builtin": true,
+      "enabled": true,
+      "icon": "🧩",
+      "name": "list_skill_marketplace",
+      "description": "Lista as skills reais registradas, as skills habilitadas e as pastas skill_* da workspace do usuario atual. Nao retorna catalogo fake.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "path": {
+            "type": "STRING",
+            "description": "Caminho opcional dentro da workspace para procurar skill_*"
+          }
+        }
+      }
+    },
+    {
+      "id": "sv_skill_list",
+      "builtin": true,
+      "enabled": true,
+      "icon": "🧾",
+      "name": "list_registered_skills",
+      "description": "Lista as skills customizadas reais salvas no registro da plataforma para o usuario atual.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {}
+      }
+    },
+    {
+      "id": "sv_skill_discover",
+      "builtin": true,
+      "enabled": true,
+      "icon": "🔎",
+      "name": "discover_workspace_skills",
+      "description": "Procura pastas skill_* dentro da workspace do usuario atual e mostra quais parecem candidatas a skill.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "path": {
+            "type": "STRING",
+            "description": "Caminho opcional dentro da workspace para procurar skill_*"
+          }
+        }
+      }
+    },
+    {
+      "id": "sv_skill_save",
+      "builtin": true,
+      "enabled": true,
+      "icon": "✨",
+      "name": "save_registered_skill",
+      "description": "Cria ou atualiza uma skill real no registro da plataforma. Use esta tool quando precisar criar uma skill utilizavel; escrever arquivos na workspace nao basta.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "id": {
+            "type": "STRING",
+            "description": "ID estavel da skill"
+          },
+          "name": {
+            "type": "STRING",
+            "description": "Nome da skill"
+          },
+          "description": {
+            "type": "STRING",
+            "description": "Descricao objetiva do que a skill faz"
+          },
+          "icon": {
+            "type": "STRING",
+            "description": "Icone opcional"
+          },
+          "enabled": {
+            "type": "BOOLEAN",
+            "description": "Se a skill deve nascer habilitada"
+          },
+          "parameters": {
+            "type": "OBJECT",
+            "description": "Schema JSON dos parametros da skill",
+            "properties": {}
+          },
+          "code": {
+            "type": "STRING",
+            "description": "Codigo JavaScript da skill. Forneca code ou action."
+          },
+          "action": {
+            "type": "OBJECT",
+            "description": "Acao HTTP opcional da skill. Forneca code ou action.",
+            "properties": {}
+          }
+        },
+        "required": [
+          "name",
+          "description"
+        ]
+      }
+    },
+    {
+      "id": "sv_skill_delete",
+      "builtin": true,
+      "enabled": true,
+      "icon": "🗑️",
+      "name": "delete_registered_skill",
+      "description": "Apaga uma skill customizada real do registro da plataforma pelo id.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "id": {
+            "type": "STRING",
+            "description": "ID da skill a apagar"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
+    }
+  ]
+}
