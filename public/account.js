@@ -26,6 +26,11 @@
     let syncTimer = null;
     let syncLoopStarted = false;
     let shellMounted = false;
+    let syncFailures = 0;
+    let syncBackoffMs = 2000;
+    const SYNC_MAX_BACKOFF = 60000;
+    const SYNC_MAX_FAILURES = 10;
+    let syncPaused = false;
 
     function clearTrackedState() {
         for (const key of STATE_KEYS) localStorage.removeItem(key);
@@ -141,37 +146,59 @@
         }
 
         updateSyncBadge('Salvando...', 'busy');
-        const res = await fetch('/api/state', {
-            method: 'POST',
-            credentials: 'same-origin',
-            keepalive: Boolean(options.keepalive),
-            headers: { 'Content-Type': 'application/json' },
-            body: payload
-        });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
+        try {
+            const res = await fetch('/api/state', {
+                method: 'POST',
+                credentials: 'same-origin',
+                keepalive: Boolean(options.keepalive),
+                headers: { 'Content-Type': 'application/json' },
+                body: payload,
+                signal: controller.signal
+            });
+            clearTimeout(timeout);
 
-        if (res.status === 401) {
-            location.replace('/login');
-            return;
+            if (res.status === 401) {
+                location.replace('/login');
+                return;
+            }
+
+            if (!res.ok) {
+                const data = await parseJsonResponse(res);
+                updateSyncBadge('Falha ao salvar', 'error');
+                throw new Error(data.error || ('HTTP ' + res.status));
+            }
+
+            lastSnapshot = serialized;
+            syncFailures = 0;
+            syncBackoffMs = 2000;
+            syncPaused = false;
+            updateSyncBadge('Salvo', 'ok');
+        } catch (err) {
+            clearTimeout(timeout);
+            syncFailures++;
+            syncBackoffMs = Math.min(syncBackoffMs * 2, SYNC_MAX_BACKOFF);
+            if (syncFailures >= SYNC_MAX_FAILURES) {
+                syncPaused = true;
+                updateSyncBadge('Sync pausado', 'error');
+                console.warn('[Sync] Pausado após ' + syncFailures + ' falhas consecutivas.');
+            } else {
+                updateSyncBadge('Falha (' + syncFailures + ')', 'error');
+            }
+            throw err;
         }
-
-        if (!res.ok) {
-            const data = await parseJsonResponse(res);
-            updateSyncBadge('Falha ao salvar', 'error');
-            throw new Error(data.error || ('HTTP ' + res.status));
-        }
-
-        lastSnapshot = serialized;
-        updateSyncBadge('Salvo', 'ok');
     }
 
     function scheduleSync(delay = 700) {
-        if (!currentUser) return;
+        if (!currentUser || syncPaused) return;
         clearTimeout(syncTimer);
+        const effectiveDelay = syncFailures > 0 ? Math.max(delay, syncBackoffMs) : delay;
         syncTimer = setTimeout(() => {
             syncState().catch((error) => {
                 console.warn('Falha ao sincronizar estado:', error.message);
             });
-        }, delay);
+        }, effectiveDelay);
     }
 
     function startSync() {
@@ -192,9 +219,10 @@
         });
 
         setInterval(() => {
+            if (syncPaused) return;
             const snapshot = stableStateString(collectState());
-            if (snapshot !== lastSnapshot) scheduleSync(250);
-        }, 1500);
+            if (snapshot !== lastSnapshot) scheduleSync(syncFailures > 0 ? syncBackoffMs : 1500);
+        }, 3000);
     }
 
     function injectShellStyles() {
