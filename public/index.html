@@ -1807,6 +1807,32 @@
             animation: livePulse 1.8s ease-in-out infinite;
         }
 
+        #live-screen-btn {
+            background: none;
+            border: 1px solid var(--border);
+            color: var(--muted);
+            border-radius: 8px;
+            padding: 5px 11px;
+            cursor: pointer;
+            display: none;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            transition: .18s ease;
+        }
+
+        #live-screen-btn:hover {
+            border-color: var(--accent2);
+            color: var(--accent2);
+        }
+
+        #live-screen-btn.on {
+            background: rgba(79, 142, 247, .14);
+            border-color: var(--accent2);
+            color: #fff;
+            box-shadow: 0 0 0 1px rgba(79, 142, 247, .18) inset;
+        }
+
         @keyframes livePulse {
 
             0%,
@@ -2463,6 +2489,9 @@
                         <button id="mic-btn" onclick="toggleSpeech()" title="Falar (STT)">🎤</button>
                         <button id="live-btn" onclick="toggleLive()" title="Modo Live — conversa de voz contínua">🔴
                             <span class="live-label">Live</span></button>
+                        <button id="live-screen-btn" onclick="toggleLiveScreenShare()"
+                            title="Compartilhar tela no Gemini Live">🖥️
+                            <span class="live-label">Tela</span></button>
                         <textarea id="msg" placeholder="Digite sua mensagem, peça uma skill ou descreva um workflow…" rows="1"></textarea>
                         <button id="send-btn" class="iBtn" onclick="send()" title="Enviar">➤</button>
                         <button id="stop-btn" class="iBtn" onclick="stop()" title="Parar geração">■</button>
@@ -4191,8 +4220,10 @@ return item;`
                 // Toggle TTS vs Live voice sections
                 const ttsGrp = document.getElementById('tts-voice-grp');
                 const liveGrp = document.getElementById('live-voice-grp');
+                const liveScreenBtn = document.getElementById('live-screen-btn');
                 if (ttsGrp) ttsGrp.style.display = live ? 'none' : '';
                 if (liveGrp) liveGrp.style.display = live ? '' : 'none';
+                if (liveScreenBtn) liveScreenBtn.style.display = live ? 'inline-flex' : 'none';
                 // Toggle LIVE badge in topbar
                 document.getElementById('live-model-badge')?.classList.toggle('on', live);
                 save();
@@ -4268,8 +4299,10 @@ return item;`
                 const isLive = isLiveModel(currentModel);
                 const ttsGrp = document.getElementById('tts-voice-grp');
                 const liveGrp = document.getElementById('live-voice-grp');
+                const liveScreenBtn = document.getElementById('live-screen-btn');
                 if (ttsGrp) ttsGrp.style.display = isLive ? 'none' : '';
                 if (liveGrp) liveGrp.style.display = isLive ? '' : 'none';
+                if (liveScreenBtn) liveScreenBtn.style.display = isLive ? 'inline-flex' : 'none';
                 document.getElementById('live-model-badge')?.classList.toggle('on', isLive);
             }
 
@@ -6108,6 +6141,11 @@ return item;`
                 previewText: '',
                 previewRenderedText: '',
                 previewRestartTimer: null,
+                screenShareStream: null,
+                screenShareVideo: null,
+                screenShareCanvas: null,
+                screenShareInterval: null,
+                screenShareActive: false,
                 turnId: 0,
 
                 async connect(apiKey, model) {
@@ -6420,6 +6458,106 @@ return item;`
                     liveSetHUD('processing', '⏳ Processando…');
                 },
 
+                updateScreenShareUi() {
+                    document.getElementById('live-screen-btn')?.classList.toggle('on', !!this.screenShareActive);
+                },
+
+                async startScreenShare(intervalMs = 5000) {
+                    if (!this.active || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+                        toast('⚠ Ative o Gemini Live antes de compartilhar a tela.');
+                        return false;
+                    }
+                    if (this.screenShareActive) return true;
+
+                    const stream = await navigator.mediaDevices.getDisplayMedia({
+                        video: {
+                            frameRate: { ideal: 1, max: 1 }
+                        },
+                        audio: false
+                    });
+
+                    const video = document.createElement('video');
+                    video.autoplay = true;
+                    video.muted = true;
+                    video.playsInline = true;
+                    video.srcObject = stream;
+                    await video.play();
+
+                    const canvas = document.createElement('canvas');
+                    const track = stream.getVideoTracks()[0];
+                    if (track) {
+                        track.onended = () => {
+                            this.stopScreenShare({ silent: true });
+                        };
+                    }
+
+                    this.screenShareStream = stream;
+                    this.screenShareVideo = video;
+                    this.screenShareCanvas = canvas;
+                    this.screenShareActive = true;
+                    this.updateScreenShareUi();
+                    await this.sendScreenFrame();
+                    this.screenShareInterval = setInterval(() => {
+                        this.sendScreenFrame();
+                    }, intervalMs);
+                    toast('🖥️ Tela compartilhada com o Gemini Live.');
+                    return true;
+                },
+
+                async sendScreenFrame() {
+                    if (!this.screenShareActive || !this.screenShareVideo || !this.screenShareCanvas) return;
+                    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+                    const video = this.screenShareVideo;
+                    const width = video.videoWidth || 0;
+                    const height = video.videoHeight || 0;
+                    if (!width || !height) return;
+
+                    const maxWidth = 1280;
+                    const scale = Math.min(1, maxWidth / width);
+                    const targetWidth = Math.max(1, Math.round(width * scale));
+                    const targetHeight = Math.max(1, Math.round(height * scale));
+                    const canvas = this.screenShareCanvas;
+                    canvas.width = targetWidth;
+                    canvas.height = targetHeight;
+
+                    const ctx = canvas.getContext('2d', { alpha: false });
+                    if (!ctx) return;
+                    ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+
+                    const frameData = canvas.toDataURL('image/jpeg', 0.72).split(',')[1];
+                    if (!frameData) return;
+
+                    this.ws.send(JSON.stringify({
+                        realtimeInput: {
+                            video: {
+                                data: frameData,
+                                mimeType: 'image/jpeg'
+                            }
+                        }
+                    }));
+                },
+
+                stopScreenShare(options = {}) {
+                    clearInterval(this.screenShareInterval);
+                    this.screenShareInterval = null;
+                    if (this.screenShareStream) {
+                        this.screenShareStream.getTracks().forEach(track => track.stop());
+                        this.screenShareStream = null;
+                    }
+                    if (this.screenShareVideo) {
+                        this.screenShareVideo.pause();
+                        this.screenShareVideo.srcObject = null;
+                        this.screenShareVideo = null;
+                    }
+                    this.screenShareCanvas = null;
+                    this.screenShareActive = false;
+                    this.updateScreenShareUi();
+                    if (!options.silent) {
+                        toast('🛑 Compartilhamento de tela encerrado.');
+                    }
+                },
+
                 onTurnComplete() {
                     if (!activeId) newConversation();
 
@@ -6704,6 +6842,7 @@ return item;`
                         this.onTurnComplete();
                     }
                     this.stopPreviewTranscription();
+                    this.stopScreenShare({ silent: true });
                     this.active = false;
                     this.pendingTranscript = '';
                     this.pendingUserTranscript = '';
@@ -6816,6 +6955,29 @@ return item;`
                     return;
                 }
                 await startLiveForCurrentModel();
+            }
+
+            async function toggleLiveScreenShare() {
+                const model = document.getElementById('model-sel').value;
+                if (!isLiveModel(model)) {
+                    toast('⚠ Compartilhamento de tela está disponível só no Gemini Live 3.1.');
+                    return;
+                }
+                if (!geminiLive.active) {
+                    toast('⚠ Ative o Gemini Live antes de compartilhar a tela.');
+                    return;
+                }
+                if (geminiLive.screenShareActive) {
+                    geminiLive.stopScreenShare();
+                    return;
+                }
+                try {
+                    await geminiLive.startScreenShare(5000);
+                } catch (error) {
+                    console.error('[GeminiLive] Screen share error:', error);
+                    toast('⚠ Falha ao compartilhar a tela: ' + (error.message || 'erro desconhecido'));
+                    geminiLive.stopScreenShare({ silent: true });
+                }
             }
 
             // ─ Init: 1 único recognition ─
