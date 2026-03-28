@@ -4177,9 +4177,14 @@ return item;`
                 document.getElementById('think-grp').style.display = (supportsThinking(m) || isCodexModel(m)) ? 'flex' : 'none';
             }
 
-            function onModelChange() {
+            async function onModelChange() {
                 const model = document.getElementById('model-sel').value;
                 const live = isLiveModel(model);
+                const shouldRestartLive = liveMode || geminiLive.active || liveRecognitionActive || liveRecognition;
+                if (isListening) stopSpeech();
+                if (shouldRestartLive) {
+                    liveStop({ silent: true });
+                }
                 syncThinkLevelOptions();
                 applyThinkVisibility();
                 syncProviderInput();
@@ -4191,6 +4196,9 @@ return item;`
                 // Toggle LIVE badge in topbar
                 document.getElementById('live-model-badge')?.classList.toggle('on', live);
                 save();
+                if (shouldRestartLive) {
+                    await startLiveForCurrentModel({ silent: true });
+                }
             }
 
             // ─ PERSIST ─
@@ -6066,6 +6074,11 @@ return item;`
                 pendingUserTranscript: '',
                 liveStreamingEl: null,
                 liveUserBubble: null,
+                previewRecognition: null,
+                previewRecognitionActive: false,
+                previewText: '',
+                previewRenderedText: '',
+                previewRestartTimer: null,
                 turnId: 0,
 
                 async connect(apiKey, model) {
@@ -6174,6 +6187,7 @@ return item;`
                         this.active = true;
                         liveSetHUD('listening', '🎙 Gemini Live Ativo — Fale!');
                         this.startAudioCapture();
+                        this.startPreviewTranscription();
                         if (onSetup) onSetup();
                         return;
                     }
@@ -6193,6 +6207,8 @@ return item;`
                             this.pendingUserTranscript = '';
                             this.liveStreamingEl = null;
                             this.liveUserBubble = null;
+                            this.clearInputPreview();
+                            this.startPreviewTranscription();
                             liveSetHUD('listening', '🎙 Interrompido — Ouvindo…');
                             return;
                         }
@@ -6201,6 +6217,7 @@ return item;`
                         const parts = sc.modelTurn?.parts || [];
                         for (const part of parts) {
                             if (part.inlineData?.mimeType?.includes('audio/pcm')) {
+                                this.stopPreviewTranscription({ preserveDisplay: true });
                                 liveSetHUD('playing', '🔊 Respondendo…');
                                 this.queueAudio(part.inlineData.data);
                             }
@@ -6211,6 +6228,9 @@ return item;`
                             const userText = sc.inputTranscription.text;
                             console.log('[GeminiLive] InputTranscription:', userText);
                             this.pendingUserTranscript += userText;
+                            if (!this.previewRecognitionActive) {
+                                this.renderInputPreview(this.pendingUserTranscript);
+                            }
 
                             // Show user speech in real-time
                             if (!activeId) newConversation();
@@ -6233,6 +6253,7 @@ return item;`
 
                         // Output transcription — stream model text in real-time
                         if (sc.outputTranscription?.text) {
+                            this.stopPreviewTranscription({ preserveDisplay: true });
                             const modelText = sc.outputTranscription.text;
                             console.log('[GeminiLive] OutputTranscription:', modelText);
                             this.pendingTranscript += modelText;
@@ -6355,6 +6376,7 @@ return item;`
                         });
                     }
                     this.pendingTranscript = '';
+                    this.previewText = '';
 
                     // Clear streaming bubble references (renderChat will redraw properly)
                     this.liveStreamingEl = null;
@@ -6370,9 +6392,116 @@ return item;`
                         : 0;
                     setTimeout(() => {
                         if (this.active) {
+                            this.clearInputPreview();
                             liveSetHUD('listening', '🎙 Ouvindo…');
+                            this.startPreviewTranscription();
                         }
                     }, remaining * 1000 + 300);
+                },
+
+                renderInputPreview(text) {
+                    const msgEl = document.getElementById('msg');
+                    if (!msgEl || !liveMode) return;
+                    msgEl.value = text || '';
+                    this.previewRenderedText = msgEl.value;
+                    autoH(msgEl);
+                },
+
+                clearInputPreview() {
+                    const msgEl = document.getElementById('msg');
+                    if (msgEl && (!msgEl.value.trim() || msgEl.value === this.previewRenderedText)) {
+                        msgEl.value = '';
+                        autoH(msgEl);
+                    }
+                    this.previewRenderedText = '';
+                },
+
+                startPreviewTranscription() {
+                    if (!this.active || !liveMode) return;
+                    if (this.previewRecognitionActive || this.previewRecognition) return;
+                    const SpeechAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
+                    if (!SpeechAPI) return;
+
+                    clearTimeout(this.previewRestartTimer);
+                    this.previewRestartTimer = null;
+                    this.previewText = '';
+                    this.clearInputPreview();
+
+                    const recognition = new SpeechAPI();
+                    recognition.lang = 'pt-BR';
+                    recognition.interimResults = true;
+                    recognition.continuous = true;
+                    recognition.maxAlternatives = 1;
+
+                    recognition.onstart = () => {
+                        this.previewRecognitionActive = true;
+                    };
+
+                    recognition.onresult = (event) => {
+                        if (!this.active || !liveMode) return;
+                        let finalText = this.previewText;
+                        let interimText = '';
+
+                        for (let i = event.resultIndex; i < event.results.length; i++) {
+                            const transcript = event.results[i][0]?.transcript?.trim();
+                            if (!transcript) continue;
+                            if (event.results[i].isFinal) {
+                                finalText = finalText ? `${finalText} ${transcript}` : transcript;
+                            } else {
+                                interimText += `${interimText ? ' ' : ''}${transcript}`;
+                            }
+                        }
+
+                        this.previewText = finalText.trim();
+                        const displayText = [this.previewText, interimText.trim()].filter(Boolean).join(' ').trim();
+                        if (displayText) {
+                            this.renderInputPreview(displayText);
+                        }
+                    };
+
+                    recognition.onerror = (event) => {
+                        this.previewRecognitionActive = false;
+                        if (event.error === 'no-speech' || event.error === 'aborted') return;
+                        console.warn('[GeminiLive] Preview STT error:', event.error);
+                    };
+
+                    recognition.onend = () => {
+                        this.previewRecognitionActive = false;
+                        this.previewRecognition = null;
+                        if (!this.active || !liveMode || this.pendingTranscript.trim()) return;
+                        clearTimeout(this.previewRestartTimer);
+                        this.previewRestartTimer = setTimeout(() => {
+                            this.startPreviewTranscription();
+                        }, 180);
+                    };
+
+                    this.previewRecognition = recognition;
+                    try {
+                        recognition.start();
+                    } catch (error) {
+                        this.previewRecognition = null;
+                        this.previewRecognitionActive = false;
+                        console.warn('[GeminiLive] Preview STT start failed:', error);
+                    }
+                },
+
+                stopPreviewTranscription(options = {}) {
+                    clearTimeout(this.previewRestartTimer);
+                    this.previewRestartTimer = null;
+                    const recognition = this.previewRecognition;
+                    this.previewRecognition = null;
+                    this.previewRecognitionActive = false;
+                    if (recognition) {
+                        recognition.onstart = null;
+                        recognition.onresult = null;
+                        recognition.onerror = null;
+                        recognition.onend = null;
+                        try { recognition.stop(); } catch (_) { }
+                    }
+                    if (!options.preserveDisplay) {
+                        this.previewText = '';
+                        this.clearInputPreview();
+                    }
                 },
 
                 // ─ Audio Capture: Mic → PCM 16bit 16kHz → WebSocket ─
@@ -6474,6 +6603,10 @@ return item;`
                 },
 
                 disconnect() {
+                    if ((this.pendingUserTranscript.trim() || this.pendingTranscript.trim()) && activeId) {
+                        this.onTurnComplete();
+                    }
+                    this.stopPreviewTranscription();
                     this.active = false;
                     this.pendingTranscript = '';
                     this.pendingUserTranscript = '';
@@ -6521,24 +6654,23 @@ return item;`
                 }
             }
 
-            // ─ Toggle ─
-            async function toggleLive() {
+            async function startLiveForCurrentModel(options = {}) {
                 const model = document.getElementById('model-sel').value;
 
                 // ═══ Gemini Live API (native WebSocket) ═══
                 if (isLiveModel(model)) {
-                    if (geminiLive.active) {
-                        geminiLive.disconnect();
-                        toast('⏹ Gemini Live encerrado.');
-                        return;
+                    const apiKey = document.getElementById('api-in').value.trim();
+                    if (!apiKey) {
+                        if (!options.silent) toast('⚠ Insira sua API Key!');
+                        return false;
                     }
 
-                    const apiKey = document.getElementById('api-in').value.trim();
-                    if (!apiKey) { toast('⚠ Insira sua API Key!'); return; }
-
                     const isSecure = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
-                    if (!isSecure) { toast('⚠ Live Mode requer HTTPS.'); return; }
-                    if (!await ensureMicPermission()) return;
+                    if (!isSecure) {
+                        if (!options.silent) toast('⚠ Live Mode requer HTTPS.');
+                        return false;
+                    }
+                    if (!await ensureMicPermission()) return false;
 
                     if (!activeId) newConversation();
 
@@ -6546,36 +6678,47 @@ return item;`
                         liveMode = true;
                         document.getElementById('live-btn')?.classList.add('on');
                         await geminiLive.connect(apiKey, model);
-                        toast('✓ Gemini Live conectado!');
+                        if (!options.silent) toast('✓ Gemini Live conectado!');
+                        return true;
                     } catch (err) {
                         liveMode = false;
                         document.getElementById('live-btn')?.classList.remove('on');
                         console.error('[GeminiLive] Connect failed:', err);
-                        toast('❌ Falha ao conectar: ' + (err.message || 'erro desconhecido'));
+                        if (!options.silent) toast('❌ Falha ao conectar: ' + (err.message || 'erro desconhecido'));
+                        return false;
                     }
-                    return;
                 }
 
                 // ═══ Legacy pipeline (Web Speech API + Ghost TTS) ═══
                 if (!window.SpeechRecognition && !window.webkitSpeechRecognition) {
-                    toast('⚠ Live Mode precisa de Chrome ou Edge.'); return;
+                    if (!options.silent) toast('⚠ Live Mode precisa de Chrome ou Edge.');
+                    return false;
                 }
                 const isSecure = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
                 if (!isSecure) {
-                    toast('⚠ Live Mode requer HTTPS. Mic não funciona em HTTP.'); return;
+                    if (!options.silent) toast('⚠ Live Mode requer HTTPS. Mic não funciona em HTTP.');
+                    return false;
                 }
                 const voice = document.getElementById('tts-voice-sel')?.value;
-                if (!voice) { toast('⚠ Selecione uma voz em Configurações > TTS antes de ativar o Live Mode.'); return; }
-                if (!await ensureMicPermission()) return;
-
-                liveMode = !liveMode;
-                document.getElementById('live-btn')?.classList.toggle('on', liveMode);
-
-                if (liveMode) {
-                    liveInit();
-                } else {
-                    liveStop();
+                if (!voice) {
+                    if (!options.silent) toast('⚠ Selecione uma voz em Configurações > TTS antes de ativar o Live Mode.');
+                    return false;
                 }
+                if (!await ensureMicPermission()) return false;
+
+                liveMode = true;
+                document.getElementById('live-btn')?.classList.add('on');
+                liveInit();
+                return true;
+            }
+
+            // ─ Toggle ─
+            async function toggleLive() {
+                if (geminiLive.active || liveMode || liveRecognitionActive || liveRecognition) {
+                    liveStop();
+                    return;
+                }
+                await startLiveForCurrentModel();
             }
 
             // ─ Init: 1 único recognition ─
@@ -6789,7 +6932,7 @@ return item;`
             }
 
             // ─ Para tudo ─
-            function liveStop() {
+            function liveStop(options = {}) {
                 // Disconnect Gemini Live WebSocket if active
                 if (geminiLive.active) {
                     geminiLive.disconnect();
@@ -6812,7 +6955,7 @@ return item;`
                 setMicStreamEnabled(true);
                 liveSetHUD('idle', '');
                 document.getElementById('live-btn')?.classList.remove('on');
-                toast('⏹ Live Mode encerrado.');
+                if (!options.silent) toast('⏹ Live Mode encerrado.');
             }
 
             // ─══════════════════════════════════════════════════════════════
