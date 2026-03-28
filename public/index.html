@@ -5588,10 +5588,27 @@ return item;`
             let speechBase = '';
             let micStream = null;
             let micPermissionState = localStorage.getItem('gc_mic_permission') || 'unknown';
+            let speechRestartTimer = null;
+            let speechRestartAttempts = 0;
+            let speechNoSpeechCount = 0;
+            let speechLastResultAt = 0;
+
+            function setMicUi(active) {
+                document.getElementById('mic-btn')?.classList.toggle('listening', !!active);
+                document.getElementById('mic-status')?.classList.toggle('on', !!active);
+            }
 
             function setMicPermissionState(state) {
                 micPermissionState = state;
                 setStorageItem('gc_mic_permission', state, { silent: true });
+            }
+
+            function releaseMicStream() {
+                if (!micStream) return;
+                try {
+                    micStream.getTracks().forEach(track => track.stop());
+                } catch (_) { }
+                micStream = null;
             }
 
             async function ensureMicPermission() {
@@ -5613,24 +5630,22 @@ return item;`
                     }
                 } catch (_) { }
 
-                if (micStream && micStream.getTracks().some(track => track.readyState === 'live')) {
-                    return true;
-                }
-
                 if (!navigator.mediaDevices?.getUserMedia) {
                     toast('⚠ Seu navegador não suporta captura de áudio. Use Chrome ou Edge em HTTPS.');
                     return false;
                 }
 
                 try {
-                    micStream = await navigator.mediaDevices.getUserMedia({
+                    const permissionProbe = await navigator.mediaDevices.getUserMedia({
                         audio: {
                             echoCancellation: true,
                             noiseSuppression: true,
                             autoGainControl: true
                         }
                     });
+                    micStream = permissionProbe;
                     setMicPermissionState('granted');
+                    releaseMicStream();
                     return true;
                 } catch (e) {
                     if (e?.name === 'NotAllowedError' || e?.name === 'SecurityError') {
@@ -5662,8 +5677,8 @@ return item;`
 
                 recognition.onstart = () => {
                     isListening = true;
-                    document.getElementById('mic-btn').classList.add('listening');
-                    document.getElementById('mic-status').classList.add('on');
+                    speechRestartAttempts = 0;
+                    setMicUi(true);
                 };
 
                 recognition.onresult = (e) => {
@@ -5683,6 +5698,8 @@ return item;`
                     }
                     msg.value = display;
                     autoH(msg);
+                    speechLastResultAt = Date.now();
+                    speechNoSpeechCount = 0;
                 };
 
                 recognition.onerror = (e) => {
@@ -5707,7 +5724,10 @@ return item;`
                         stopSpeech();
                         return;
                     }
-                    if (e.error === 'no-speech') return;
+                    if (e.error === 'no-speech') {
+                        speechNoSpeechCount += 1;
+                        return;
+                    }
                     if (e.error === 'aborted') return; // Ignore user-initiated abort
                     // Catch-all for unknown errors
                     console.warn('[STT] Erro não tratado:', e.error, e);
@@ -5717,16 +5737,35 @@ return item;`
 
                 recognition.onend = () => {
                     if (!isListening) return;
-                    // Android Chrome mata continuous recognition após silêncio — auto-restart
-                    setTimeout(() => {
-                        if (isListening && recognition) {
-                            try { recognition.start(); } catch (_) {
-                                isListening = false;
-                                document.getElementById('mic-btn').classList.remove('listening');
-                                document.getElementById('mic-status').classList.remove('on');
+                    clearTimeout(speechRestartTimer);
+                    speechRestartTimer = setTimeout(() => {
+                        if (!isListening || !recognition) return;
+                        try {
+                            recognition.start();
+                        } catch (_) {
+                            speechRestartAttempts += 1;
+                            if (speechRestartAttempts < 4) {
+                                clearTimeout(speechRestartTimer);
+                                speechRestartTimer = setTimeout(() => {
+                                    if (!isListening || !recognition) return;
+                                    try {
+                                        recognition.start();
+                                    } catch (_) {
+                                        speechRestartAttempts += 1;
+                                        if (speechRestartAttempts >= 4) {
+                                            stopSpeech();
+                                        }
+                                    }
+                                }, 900);
+                                return;
                             }
+                            const stale = !speechLastResultAt || (Date.now() - speechLastResultAt > 12000);
+                            if (speechNoSpeechCount >= 2 && stale) {
+                                toast('⚠ O microfone iniciou, mas o navegador não detectou fala. Verifique o dispositivo de entrada.');
+                            }
+                            stopSpeech();
                         }
-                    }, 300);
+                    }, 700);
                 };
 
                 return recognition;
@@ -5751,8 +5790,10 @@ return item;`
             async function startSpeech() {
                 if (isListening) return;
                 if (!await ensureMicPermission()) return;
-                setMicStreamEnabled(true);
                 speechBase = document.getElementById('msg').value.trim();
+                speechRestartAttempts = 0;
+                speechNoSpeechCount = 0;
+                speechLastResultAt = 0;
                 const stt = initSpeech();
                 if (!stt) return;
                 try {
@@ -5764,19 +5805,20 @@ return item;`
 
             function stopSpeech() {
                 isListening = false;
-                document.getElementById('mic-btn').classList.remove('listening');
-                document.getElementById('mic-status').classList.remove('on');
+                clearTimeout(speechRestartTimer);
+                speechRestartTimer = null;
+                setMicUi(false);
                 if (recognition) {
                     try { recognition.stop(); } catch (_) { }
                 }
                 speechBase = '';
+                speechRestartAttempts = 0;
+                speechNoSpeechCount = 0;
             }
 
             window.addEventListener('beforeunload', () => {
                 if (geminiLive.active) geminiLive.disconnect();
-                if (!micStream) return;
-                micStream.getTracks().forEach(track => track.stop());
-                micStream = null;
+                releaseMicStream();
             });
 
             window.addEventListener('DOMContentLoaded', () => {
@@ -6001,6 +6043,10 @@ return item;`
             let liveAccum = '';
             let liveLastDisplay = '';
             let liveIgnoreUntil = 0;
+            let liveRestartTimer = null;
+            let liveRestartAttempts = 0;
+            let liveNoSpeechCount = 0;
+            let liveLastResultAt = 0;
             const LIVE_SILENCE_MS = 3000;
 
             // ─══════════════════════════════════════════════════════════════
@@ -6383,6 +6429,7 @@ return item;`
                     } catch (e) {
                         console.error('[GeminiLive] Audio capture error:', e);
                         toast('⚠ Mic: ' + e.message);
+                        this.disconnect();
                     }
                 },
 
@@ -6491,6 +6538,7 @@ return item;`
 
                     const isSecure = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
                     if (!isSecure) { toast('⚠ Live Mode requer HTTPS.'); return; }
+                    if (!await ensureMicPermission()) return;
 
                     if (!activeId) newConversation();
 
@@ -6552,6 +6600,9 @@ return item;`
 
                 liveAccum = '';
                 liveLastDisplay = '';
+                liveRestartAttempts = 0;
+                liveNoSpeechCount = 0;
+                liveLastResultAt = 0;
 
                 r.onresult = (e) => {
                     if (liveIgnoreSTT || !liveMode) return;
@@ -6573,6 +6624,8 @@ return item;`
 
                     const msgEl = document.getElementById('msg');
                     if (msgEl) { msgEl.value = display; autoH(msgEl); }
+                    liveLastResultAt = Date.now();
+                    liveNoSpeechCount = 0;
 
                     if (display.trim() && display !== liveLastDisplay) {
                         liveLastDisplay = display;
@@ -6595,7 +6648,7 @@ return item;`
                     if (e.error === 'network') { toast('⚠ Erro de rede no Live Mode.'); liveStop(); return; }
                     if (e.error === 'service-not-allowed') { toast('⚠ Serviço de voz indisponível (HTTPS requerido).'); liveStop(); return; }
                     if (e.error === 'aborted') return;
-                    if (e.error === 'no-speech') return; // Silêncio — onend vai reiniciar automaticamente
+                    if (e.error === 'no-speech') { liveNoSpeechCount += 1; return; } // Silêncio — onend vai reiniciar automaticamente
                     console.warn('[Live STT] Erro:', e.error);
                     toast('⚠ Erro no Live Mode: ' + (e.error || 'desconhecido'));
                 };
@@ -6603,20 +6656,32 @@ return item;`
                 r.onend = () => {
                     liveRecognitionActive = false;
                     if (!liveMode || liveIgnoreSTT) return;
-                    // Android Chrome mata continuous recognition — auto-restart
-                    setTimeout(() => {
+                    clearTimeout(liveRestartTimer);
+                    liveRestartTimer = setTimeout(() => {
                         if (liveMode && !liveIgnoreSTT && liveRecognition) {
-                            try { liveRecognition.start(); } catch (_) {
-                                liveSetHUD('idle', 'Microfone pausado');
+                            try {
+                                liveRecognition.start();
+                                liveRestartAttempts = 0;
+                            } catch (_) {
+                                liveRestartAttempts += 1;
+                                if (liveRestartAttempts >= 4) {
+                                    const stale = !liveLastResultAt || (Date.now() - liveLastResultAt > 12000);
+                                    if (liveNoSpeechCount >= 2 && stale) {
+                                        toast('⚠ O navegador não detectou fala no Live Mode. Verifique o microfone ativo.');
+                                    }
+                                    liveSetHUD('idle', 'Microfone pausado');
+                                    liveStop();
+                                }
                             }
                         } else {
                             liveSetHUD('idle', 'Microfone pausado');
                         }
-                    }, 300);
+                    }, 700);
                 };
 
                 r.onstart = () => {
                     liveRecognitionActive = true;
+                    liveRestartAttempts = 0;
                     speechBase = '';
                     const msgEl = document.getElementById('msg');
                     if (msgEl && !liveAccum) msgEl.value = '';
@@ -6631,6 +6696,7 @@ return item;`
                 liveIgnoreSTT = true;
                 clearTimeout(liveSilenceTimer);
                 clearInterval(liveBarInterval);
+                clearTimeout(liveRestartTimer);
                 liveSilenceStart = null;
                 setMicStreamEnabled(false);
                 if (liveRecognition) {
@@ -6709,6 +6775,8 @@ return item;`
                 liveSilenceStart = null;
                 liveAccum = '';
                 liveLastDisplay = '';
+                liveNoSpeechCount = 0;
+                liveRestartAttempts = 0;
                 speechBase = '';
                 const msgEl = document.getElementById('msg');
                 if (msgEl) msgEl.value = '';
@@ -6730,12 +6798,15 @@ return item;`
                 liveIgnoreSTT = false;
                 clearTimeout(liveSilenceTimer);
                 clearInterval(liveBarInterval);
+                clearTimeout(liveRestartTimer);
                 if (liveRecognition) {
                     try { liveRecognition.stop(); } catch (_) { }
                     liveRecognition = null;
                 }
                 liveRecognitionActive = false;
                 liveSpeakResolver = null;
+                liveRestartAttempts = 0;
+                liveNoSpeechCount = 0;
 
                 ttsStop();
                 setMicStreamEnabled(true);
