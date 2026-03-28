@@ -287,44 +287,352 @@ body {
     justify-content: center;
   }
 
-  /* ─ INPUT BAR LIMPO (MENOS BOTÕES) ─ */
+  /* ─ INPUT BAR — LIMPO (só textarea + send) ─ */
   #ibar {
+    display: flex;
+    flex-wrap: nowrap;
     padding: 8px 10px;
-    gap: 6px;
-    border-radius: 20px;
+    gap: 8px;
+    border-radius: 22px;
+    align-items: flex-end;
   }
+
   #msg {
-    min-height: 38px;
+    order: 1;
     flex: 1 1 0;
+    min-width: 0;
+    min-height: 38px;
     font-size: 16px; /* evita zoom iOS */
   }
-  /* Botões mic e live compactos no mobile */
-  #mic-btn {
-    width: 32px;
-    height: 32px;
-    font-size: 15px;
-    flex-shrink: 0;
-  }
-  #live-btn {
-    font-size: 10px;
-    padding: 4px 8px;
-    flex-shrink: 0;
-  }
-  /* Botões de clip e send maiores */
-  #attach-btn {
-    width: 38px;
-    height: 38px;
-    font-size: 17px;
-    flex-shrink: 0;
-    border-radius: 12px;
-  }
+
   #send-btn, #stop-btn {
+    order: 2;
     width: 40px;
     height: 40px;
-    font-size: 16px;
-    border-radius: 12px;
+    font-size: 17px;
+    border-radius: 50%;
     flex-shrink: 0;
   }
-  
-  /* Restante das regras mobile... (bubbles, modal, etc) */
+
+  /* ─ FLOATING ACTION BUTTONS (canto inferior direito) ─ */
+  #attach-btn,
+  #mic-btn,
+  #live-btn {
+    position: fixed !important;
+    right: 14px;
+    z-index: 90;
+    width: 40px !important;
+    height: 40px !important;
+    border-radius: 50% !important;
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    padding: 0 !important;
+    background: rgba(18, 18, 30, 0.88);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255,255,255,0.10);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4), 0 0 0 0.5px rgba(168,213,255,0.08);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    flex-shrink: 0;
+  }
+  #attach-btn:active,
+  #mic-btn:active,
+  #live-btn:active {
+    transform: scale(0.9);
+  }
+
+  /* Stack vertical — de baixo pra cima */
+  #attach-btn { bottom: 76px; }
+  #mic-btn    { bottom: 122px; }
+  #live-btn   { bottom: 168px; font-size: 14px; }
+  #live-btn .live-label {
+    display: none;
+  }
+
+  /* ─ CHAT BUBBLES MOBILE ─ */
+  .row {
+    padding: 6px 8px;
+    gap: 8px;
+  }
+  .row .av {
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
+    font-size: 14px;
+  }
+  .bub {
+    max-width: 100% !important;
+    padding: 10px 12px;
+    font-size: 14px;
+    line-height: 1.55;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
+  .bub pre {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    font-size: 12px;
+  }
+  .bub img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 8px;
+  }
+  .meta {
+    font-size: 10px;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .msg-actions {
+    gap: 4px;
+  }
+  .msg-act-btn {
+    font-size: 11px;
+    padding: 3px 8px;
+  }
+
+  /* ─ ATTACHED IMAGES/FILES IN BUBBLE ─ */
+  .attached-imgs {
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .attached-imgs img {
+    max-width: 100%;
+    max-height: 200px;
+    border-radius: 8px;
+  }
+  .file-preview {
+    font-size: 11px;
+    padding: 5px 8px;
+    max-width: 100%;
+  }
+
+  /* ─ IMAGE PREVIEW CONTAINER ─ */
+  #img-preview-container {
+    padding: 6px 8px;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  #img-preview-container img {
+    max-height: 60px;
+    border-radius: 6px;
+  }
+
+  /* ─ CODE BLOCKS MOBILE ─ */
+  .code-container {
+    border-radius: 10px;
+    margin: 8px 0;
+  }
+  .code-header {
+    padding: 6px 10px;
+    font-size: 11px;
+  }
+  .copy-code-btn {
+    font-size: 10px;
+    padding: 2px 8px;
+  }
+
+  /* ─ CONFIG PANEL MOBILE ─ */
+  #cfg {
+    max-height: 70vh;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  #cfg-head {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+  #cfg-body {
+    flex-direction: column !important;
+    flex-wrap: nowrap !important;
+    padding: 10px 12px;
+    gap: 10px;
+  }
+  #cfg-body .sg {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+  #cfg-body .sg-wide {
+    width: 100% !important;
+  }
+  #cfg-body .sg-tts {
+    width: 100% !important;
+  }
+  #cfg-body textarea.ta {
+    min-height: 80px;
+    font-size: 13px;
+  }
+  #cfg-body label {
+    font-size: 12px;
+  }
+  #cfg-body select, #cfg-body input {
+    font-size: 13px;
+  }
+
+  /* ─ MODALS MOBILE ─ */
+  #shortcuts-modal .shortcuts-box {
+    min-width: unset;
+    max-width: 92vw;
+    padding: 16px 18px;
+    margin: 12px;
+    border-radius: 14px;
+  }
+  .sc-row {
+    font-size: 12px;
+    padding: 4px 0;
+  }
+  .sc-key {
+    font-size: 10px;
+    padding: 2px 6px;
+  }
+
+  /* ─ MERMAID DIAGRAMS MOBILE ─ */
+  .mermaid-container {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    border-radius: 10px;
+  }
+  .mermaid-header {
+    font-size: 12px;
+    padding: 6px 10px;
+  }
+  .mermaid-body {
+    padding: 8px;
+    min-height: 100px;
+  }
+  .mermaid-body svg {
+    max-width: 100%;
+    height: auto;
+  }
+
+  /* ─ SIDEBAR MOBILE POLISH ─ */
+  #sidebar {
+    width: 82vw;
+    max-width: 320px;
+  }
+  #sb-head h2 {
+    font-size: 15px;
+  }
+  #sb-actions {
+    gap: 4px;
+  }
+  .action-btn {
+    font-size: 12px;
+    padding: 6px 10px;
+  }
+  .ci {
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+  .ci-title {
+    font-size: 13px;
+  }
+  #search-box {
+    font-size: 14px;
+    padding: 8px 12px;
+  }
+
+  /* ─ EMPTY STATE MOBILE ─ */
+  #empty {
+    padding: 30px 20px;
+  }
+  #empty h3 {
+    font-size: 18px;
+  }
+  #empty p {
+    font-size: 13px;
+    max-width: 100%;
+  }
+  .empty-features {
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: center;
+  }
+  .empty-features span {
+    font-size: 11px;
+    padding: 4px 10px;
+  }
+
+  /* ─ TOAST MOBILE ─ */
+  #toast {
+    max-width: 90vw;
+    font-size: 13px;
+    padding: 8px 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: 80px;
+  }
+
+  /* ─ MIC STATUS / LIVE HUD MOBILE ─ */
+  #mic-status {
+    font-size: 12px;
+    padding: 6px 14px;
+    border-radius: 14px;
+  }
+  #live-hud {
+    font-size: 12px;
+    padding: 6px 14px;
+    max-width: 90vw;
+    border-radius: 14px;
+  }
+
+  /* ─ TTS BAR MOBILE ─ */
+  #tts-bar {
+    font-size: 12px;
+    max-width: 90vw;
+    padding: 6px 12px;
+    border-radius: 12px;
+  }
+  #tts-bar-label {
+    max-width: 140px !important;
+    font-size: 11px !important;
+  }
+
+  /* ─ DROP OVERLAY MOBILE ─ */
+  #drop-overlay {
+    font-size: 14px;
+  }
+  #drop-overlay .drop-icon {
+    font-size: 40px;
+  }
+
+  /* ─ THINKING INDICATOR MOBILE ─ */
+  .thinking-indicator {
+    padding: 10px 14px;
+    font-size: 13px;
+  }
+  .skeleton-lines {
+    padding: 6px 14px 14px;
+  }
+  .skeleton-line {
+    height: 10px;
+    border-radius: 4px;
+  }
+
+  /* ─ STT/LIVE CAPABILITY BANNER ─ */
+  #stt-banner {
+    font-size: 11px;
+    padding: 6px 12px;
+    margin: 4px 8px;
+    border-radius: 8px;
+  }
+
+  /* ─ CHAT CONTAINER SCROLL PERFORMANCE ─ */
+  #chat {
+    -webkit-overflow-scrolling: touch;
+    scroll-behavior: smooth;
+  }
+
+  /* ─ IBAR CONTAINER ─ */
+  #ibar-container {
+    padding: 6px 8px;
+  }
 }

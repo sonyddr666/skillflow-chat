@@ -2382,7 +2382,7 @@
                             title="Anexar Imagem">📎</button>
                         <button id="mic-btn" onclick="toggleSpeech()" title="Falar (STT)">🎤</button>
                         <button id="live-btn" onclick="toggleLive()" title="Modo Live — conversa de voz contínua">🔴
-                            Live</button>
+                            <span class="live-label">Live</span></button>
                         <textarea id="msg" placeholder="Digite sua mensagem, peça uma skill ou descreva um workflow…" rows="1"></textarea>
                         <button id="send-btn" class="iBtn" onclick="send()" title="Enviar">➤</button>
                         <button id="stop-btn" class="iBtn" onclick="stop()" title="Parar geração">■</button>
@@ -4446,6 +4446,30 @@ return item;`
     </div>`).join('');
             }
 
+            // ─ RENDER CHAT (lazy rendering — Estratégia A) ─
+            const CHAT_PAGE_SIZE = 25;
+            let chatRenderedFrom = 0;     // index of the oldest rendered message
+            let chatRenderedCount = 0;     // how many messages are currently rendered
+            let chatScrollObserver = null; // IntersectionObserver for loading older msgs
+            const msgHTMLCache = new Map(); // key: convId+msgIndex+msgTs → HTML string
+
+            function msgCacheKey(convId, idx, msg) {
+                return `${convId}:${idx}:${msg.ts || 0}:${(msg.text || '').length}`;
+            }
+
+            function cachedMsgHTML(convId, msg, idx) {
+                const key = msgCacheKey(convId, idx, msg);
+                if (msgHTMLCache.has(key)) return msgHTMLCache.get(key);
+                const html = msgHTML(msg, idx);
+                msgHTMLCache.set(key, html);
+                // Keep cache bounded
+                if (msgHTMLCache.size > 500) {
+                    const first = msgHTMLCache.keys().next().value;
+                    msgHTMLCache.delete(first);
+                }
+                return html;
+            }
+
             function renderChat() {
                 const c = document.getElementById('chat');
                 const messages = activeId ? conversationMessages(convs[activeId]) : [];
@@ -4461,12 +4485,96 @@ return item;`
         <span>Logs e approvals</span>
       </div>
     </div>`;
+                    chatRenderedFrom = 0;
+                    chatRenderedCount = 0;
+                    cleanupChatObserver();
                     return;
                 }
-                c.innerHTML = messages.map((m, i) => msgHTML(m, i)).join('');
+
+                // Render only last CHAT_PAGE_SIZE messages initially
+                const total = messages.length;
+                const from = Math.max(0, total - CHAT_PAGE_SIZE);
+                const slice = messages.slice(from);
+
+                const html = slice.map((m, i) => cachedMsgHTML(activeId, m, from + i)).join('');
+
+                // Add sentinel for loading older messages
+                const hasOlder = from > 0;
+                const sentinel = hasOlder
+                    ? `<div id="chat-load-more" style="text-align:center;padding:12px;color:var(--muted);font-size:12px;cursor:pointer" onclick="loadOlderMessages()">⬆ Carregar mensagens anteriores (${from} restantes)</div>`
+                    : '';
+
+                c.innerHTML = sentinel + html;
+                chatRenderedFrom = from;
+                chatRenderedCount = slice.length;
+
                 scrollEnd();
-                // Use rAF to ensure DOM is painted before mermaid.run() reads element content
                 requestAnimationFrame(() => renderMermaidBlocks());
+
+                // Setup IntersectionObserver for auto-loading older messages
+                setupChatObserver();
+            }
+
+            function loadOlderMessages() {
+                if (!activeId) return;
+                const messages = conversationMessages(convs[activeId]);
+                if (chatRenderedFrom <= 0) return;
+
+                const c = document.getElementById('chat');
+                const prevScrollHeight = c.scrollHeight;
+
+                // Load next batch
+                const newFrom = Math.max(0, chatRenderedFrom - CHAT_PAGE_SIZE);
+                const batchMsgs = messages.slice(newFrom, chatRenderedFrom);
+
+                // Build HTML for the batch
+                const batchHtml = batchMsgs.map((m, i) => cachedMsgHTML(activeId, m, newFrom + i)).join('');
+
+                // Update sentinel
+                const hasOlder = newFrom > 0;
+                const sentinel = hasOlder
+                    ? `<div id="chat-load-more" style="text-align:center;padding:12px;color:var(--muted);font-size:12px;cursor:pointer" onclick="loadOlderMessages()">⬆ Carregar mensagens anteriores (${newFrom} restantes)</div>`
+                    : '';
+
+                // Remove old sentinel and prepend new batch
+                const oldSentinel = document.getElementById('chat-load-more');
+                if (oldSentinel) oldSentinel.remove();
+
+                c.insertAdjacentHTML('afterbegin', sentinel + batchHtml);
+
+                chatRenderedFrom = newFrom;
+                chatRenderedCount += batchMsgs.length;
+
+                // Maintain scroll position
+                requestAnimationFrame(() => {
+                    const newScrollHeight = c.scrollHeight;
+                    c.scrollTop += (newScrollHeight - prevScrollHeight);
+                    renderMermaidBlocks();
+                });
+
+                // Re-setup observer on new sentinel
+                setupChatObserver();
+            }
+
+            function setupChatObserver() {
+                cleanupChatObserver();
+                const sentinel = document.getElementById('chat-load-more');
+                if (!sentinel) return;
+
+                chatScrollObserver = new IntersectionObserver((entries) => {
+                    if (entries[0]?.isIntersecting) {
+                        loadOlderMessages();
+                    }
+                }, { root: document.getElementById('chat'), rootMargin: '200px 0px 0px 0px' });
+
+                chatScrollObserver.observe(sentinel);
+            }
+
+            function cleanupChatObserver() {
+                if (chatScrollObserver) {
+                    chatScrollObserver.disconnect();
+                    chatScrollObserver = null;
+                }
             }
 
             // ─ FILE HANDLING ─
@@ -5089,6 +5197,24 @@ return item;`
             });
 
             // ─ INIT ─
+            function checkSTTCapability() {
+                const hasSpeechAPI = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+                const isSecure = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+                const issues = [];
+                if (!hasSpeechAPI) issues.push('Browser não suporta STT (use Chrome/Edge)');
+                if (!isSecure) issues.push('HTTPS necessário para microfone');
+
+                if (issues.length) {
+                    // Disable mic and live buttons visually
+                    const micBtn = document.getElementById('mic-btn');
+                    const liveBtn = document.getElementById('live-btn');
+                    if (micBtn) { micBtn.style.opacity = '0.4'; micBtn.title = issues.join(', '); }
+                    if (liveBtn) { liveBtn.style.opacity = '0.4'; liveBtn.title = issues.join(', '); }
+                    console.warn('[SkillFlow] STT indisponível:', issues.join('; '));
+                }
+                return issues;
+            }
+
             async function initApp() {
                 try {
                     if (window.__ACCOUNT_BOOTSTRAP__) {
@@ -5119,6 +5245,9 @@ return item;`
 
                 window.__skillflowAccount?.mountShell?.();
                 window.__skillflowAccount?.startSync?.();
+
+                // Proactive STT capability check
+                checkSTTCapability();
             }
 
             initApp();
@@ -5161,7 +5290,8 @@ return item;`
                 }
 
                 if (!navigator.mediaDevices?.getUserMedia) {
-                    return true;
+                    toast('⚠ Seu navegador não suporta captura de áudio. Use Chrome ou Edge em HTTPS.');
+                    return false;
                 }
 
                 try {
@@ -5237,7 +5367,23 @@ return item;`
                     if (e.error === 'audio-capture') {
                         toast('⚠ Nenhum microfone disponivel.');
                         stopSpeech();
+                        return;
                     }
+                    if (e.error === 'network') {
+                        toast('⚠ Erro de rede no reconhecimento de voz. Verifique sua conexão.');
+                        stopSpeech();
+                        return;
+                    }
+                    if (e.error === 'service-not-allowed') {
+                        toast('⚠ Serviço de voz indisponível. HTTPS é necessário.');
+                        stopSpeech();
+                        return;
+                    }
+                    if (e.error === 'aborted') return; // Ignore user-initiated abort
+                    // Catch-all for unknown errors
+                    console.warn('[STT] Erro não tratado:', e.error, e);
+                    toast('⚠ Erro no reconhecimento de voz: ' + (e.error || 'desconhecido'));
+                    stopSpeech();
                 };
 
                 recognition.onend = () => {
@@ -5557,8 +5703,12 @@ return item;`
                 if (!window.SpeechRecognition && !window.webkitSpeechRecognition) {
                     toast('⚠ Live Mode precisa de Chrome ou Edge.'); return;
                 }
+                const isSecure = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+                if (!isSecure) {
+                    toast('⚠ Live Mode requer HTTPS. Mic não funciona em HTTP.'); return;
+                }
                 const voice = document.getElementById('tts-voice-sel')?.value;
-                if (!voice) { toast('⚠ Selecione uma voz em Configuracoes > TTS.'); return; }
+                if (!voice) { toast('⚠ Selecione uma voz em Configurações > TTS antes de ativar o Live Mode.'); return; }
                 if (!await ensureMicPermission()) return;
 
                 liveMode = !liveMode;
@@ -5577,6 +5727,12 @@ return item;`
                 if (!SpeechAPI) { toast('⚠ Chrome/Edge necessário.'); return; }
 
                 stopSpeech();
+                // Limpar recognition anterior antes de criar novo
+                if (liveRecognition) {
+                    try { liveRecognition.abort(); } catch (_) { }
+                    liveRecognition = null;
+                    liveRecognitionActive = false;
+                }
                 setMicStreamEnabled(true);
                 const r = new SpeechAPI();
                 r.lang = 'pt-BR';
@@ -5626,7 +5782,12 @@ return item;`
 
                 r.onerror = (e) => {
                     if (e.error === 'not-allowed') { toast('⚠ Mic negado.'); liveStop(); return; }
-                    if (e.error === 'audio-capture') { toast('⚠ Nenhum microfone disponivel.'); liveStop(); }
+                    if (e.error === 'audio-capture') { toast('⚠ Nenhum microfone disponível.'); liveStop(); return; }
+                    if (e.error === 'network') { toast('⚠ Erro de rede no Live Mode.'); liveStop(); return; }
+                    if (e.error === 'service-not-allowed') { toast('⚠ Serviço de voz indisponível (HTTPS requerido).'); liveStop(); return; }
+                    if (e.error === 'aborted') return;
+                    console.warn('[Live STT] Erro:', e.error);
+                    toast('⚠ Erro no Live Mode: ' + (e.error || 'desconhecido'));
                 };
 
                 r.onend = () => {
@@ -5705,7 +5866,7 @@ return item;`
                             liveSpeakResolver = null;
                             done('no-audio');
                         }
-                        if (liveMode) setTimeout(() => liveResumeListening(), 900);
+                        if (liveMode) setTimeout(() => liveResumeListening(), 200);
                         return;
                     }
 
@@ -5716,7 +5877,7 @@ return item;`
                             liveSpeakResolver = null;
                             done('ended');
                         }
-                        if (liveMode) setTimeout(() => liveResumeListening(), 900);
+                        if (liveMode) setTimeout(() => liveResumeListening(), 200);
                     };
 
                     ttsAudio.onerror = () => {
@@ -5726,7 +5887,7 @@ return item;`
                             liveSpeakResolver = null;
                             done('errored');
                         }
-                        if (liveMode) setTimeout(() => liveResumeListening(), 900);
+                        if (liveMode) setTimeout(() => liveResumeListening(), 200);
                     };
                 });
             }
@@ -5741,7 +5902,7 @@ return item;`
                 speechBase = '';
                 const msgEl = document.getElementById('msg');
                 if (msgEl) msgEl.value = '';
-                setTimeout(() => setMicStreamEnabled(true), 900);
+                setTimeout(() => setMicStreamEnabled(true), 200);
                 // Restart recognition fresh
                 if (liveRecognition && !liveRecognitionActive) {
                     try { liveRecognition.start(); } catch (_) { }
