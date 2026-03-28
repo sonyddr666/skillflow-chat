@@ -1808,7 +1808,11 @@ async function serveStatic(req, res, user) {
   const ext = extname(finalPath).toLowerCase();
   const contentType = MIME_TYPES[ext] || "application/octet-stream";
 
-  res.writeHead(200, { "Content-Type": contentType });
+  const noCacheExt = [".html", ".css", ".js"].includes(ext);
+  res.writeHead(200, {
+    "Content-Type": contentType,
+    "Cache-Control": noCacheExt ? "no-cache, no-store, must-revalidate" : "public, max-age=3600"
+  });
   createReadStream(finalPath).pipe(res);
 }
 
