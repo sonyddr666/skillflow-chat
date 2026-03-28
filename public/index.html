@@ -5074,11 +5074,27 @@ return item;`
 
                 // ═══ Live model: text must go via WebSocket (no REST support) ═══
                 if (isLiveModel(model)) {
-                    if (!text) return;
                     const apiKey = document.getElementById('api-in').value.trim();
                     if (!apiKey) { toast('⚠ Insira sua API Key!'); return; }
 
                     input.value = ''; autoH(input);
+
+                    let imgsToSave = [...pendingImages];
+                    let filesToSave = [...pendingFiles];
+                    pendingImages = [];
+                    pendingFiles = [];
+                    renderImagePreview();
+
+                    try {
+                        imgsToSave = await persistPendingAttachments(imgsToSave, 'images');
+                        filesToSave = await persistPendingAttachments(filesToSave, 'files');
+                    } catch (error) {
+                        pendingImages = imgsToSave;
+                        pendingFiles = filesToSave;
+                        renderImagePreview();
+                        toast('⚠ Falha ao salvar anexos do usuário: ' + (error.message || 'erro desconhecido'));
+                        return;
+                    }
 
                     // Flush pending voice transcripts BEFORE adding text (preserves chronological order)
                     if (geminiLive.active && (geminiLive.pendingTranscript.trim() || geminiLive.pendingUserTranscript.trim())) {
@@ -5086,9 +5102,14 @@ return item;`
                     }
 
                     // Log user text message
-                    convs[activeId].msgs.push({ role: 'user', text, ts: Date.now() });
+                    const msgData = { role: 'user', text, ts: Date.now(), live: true };
+                    if (imgsToSave.length) msgData.imgs = imgsToSave;
+                    if (filesToSave.length) msgData.files = filesToSave;
+                    convs[activeId].msgs.push(msgData);
                     if (convs[activeId].msgs.length === 1) {
-                        convs[activeId].title = text.slice(0, 48) + (text.length > 48 ? '…' : '');
+                        convs[activeId].title = text
+                            ? text.slice(0, 48) + (text.length > 48 ? '…' : '')
+                            : (imgsToSave.length ? 'Imagem enviada' : filesToSave[0]?.name || 'Arquivo enviado');
                     }
                     saveConvs(); renderSidebar(); renderChat();
 
@@ -5106,7 +5127,11 @@ return item;`
                         }
                     }
 
-                    geminiLive.sendText(text);
+                    geminiLive.sendTurn({
+                        text,
+                        images: imgsToSave,
+                        files: filesToSave
+                    });
                     return;
                 }
 
@@ -6227,8 +6252,8 @@ return item;`
                         if (sc.inputTranscription?.text) {
                             const userText = sc.inputTranscription.text;
                             console.log('[GeminiLive] InputTranscription:', userText);
-                            this.pendingUserTranscript += userText;
-                            if (!this.previewRecognitionActive) {
+                            this.pendingUserTranscript = this.mergeTranscriptText(this.pendingUserTranscript, userText);
+                            if (!this.previewRecognitionActive || this.isAndroidDevice()) {
                                 this.renderInputPreview(this.pendingUserTranscript);
                             }
 
@@ -6256,7 +6281,7 @@ return item;`
                             this.stopPreviewTranscription({ preserveDisplay: true });
                             const modelText = sc.outputTranscription.text;
                             console.log('[GeminiLive] OutputTranscription:', modelText);
-                            this.pendingTranscript += modelText;
+                            this.pendingTranscript = this.mergeTranscriptText(this.pendingTranscript, modelText);
 
                             // Show model response text in real-time
                             if (!activeId) newConversation();
@@ -6345,6 +6370,31 @@ return item;`
                     liveSetHUD('processing', '⏳ Processando…');
                 },
 
+                sendTurn({ text = '', images = [], files = [] } = {}) {
+                    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+                    const parts = [];
+                    if (text) parts.push({ text });
+                    (images || []).filter(img => img?.data).forEach(img => {
+                        parts.push({ inlineData: { mimeType: img.mimeType || 'image/png', data: img.data } });
+                    });
+                    (files || []).filter(file => file?.data).forEach(file => {
+                        parts.push({ inlineData: { mimeType: file.mimeType || 'application/octet-stream', data: file.data } });
+                    });
+                    if (!parts.length) return;
+
+                    const msg = {
+                        clientContent: {
+                            turns: [{
+                                role: 'user',
+                                parts
+                            }],
+                            turnComplete: true
+                        }
+                    };
+                    this.ws.send(JSON.stringify(msg));
+                    liveSetHUD('processing', '⏳ Processando…');
+                },
+
                 onTurnComplete() {
                     if (!activeId) newConversation();
 
@@ -6416,8 +6466,30 @@ return item;`
                     this.previewRenderedText = '';
                 },
 
+                isAndroidDevice() {
+                    return /Android/i.test(navigator.userAgent || '');
+                },
+
+                mergeTranscriptText(base, chunk) {
+                    const current = String(base || '').replace(/\s+/g, ' ').trim();
+                    const incoming = String(chunk || '').replace(/\s+/g, ' ').trim();
+                    if (!incoming) return current;
+                    if (!current) return incoming;
+                    if (current === incoming || current.endsWith(incoming)) return current;
+                    if (incoming.startsWith(current)) return incoming;
+
+                    const maxOverlap = Math.min(current.length, incoming.length);
+                    for (let len = maxOverlap; len > 0; len--) {
+                        if (current.slice(-len) === incoming.slice(0, len)) {
+                            return `${current}${incoming.slice(len)}`.replace(/\s+/g, ' ').trim();
+                        }
+                    }
+                    return `${current} ${incoming}`.replace(/\s+/g, ' ').trim();
+                },
+
                 startPreviewTranscription() {
                     if (!this.active || !liveMode) return;
+                    if (this.isAndroidDevice()) return;
                     if (this.previewRecognitionActive || this.previewRecognition) return;
                     const SpeechAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
                     if (!SpeechAPI) return;
@@ -6446,9 +6518,9 @@ return item;`
                             const transcript = event.results[i][0]?.transcript?.trim();
                             if (!transcript) continue;
                             if (event.results[i].isFinal) {
-                                finalText = finalText ? `${finalText} ${transcript}` : transcript;
+                                finalText = this.mergeTranscriptText(finalText, transcript);
                             } else {
-                                interimText += `${interimText ? ' ' : ''}${transcript}`;
+                                interimText = this.mergeTranscriptText(interimText, transcript);
                             }
                         }
 
