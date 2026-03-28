@@ -5723,9 +5723,9 @@ return item;`
                     let interim = '';
                     for (let i = e.resultIndex; i < e.results.length; i++) {
                         if (e.results[i].isFinal) {
-                            speechBase += (speechBase ? ' ' : '') + e.results[i][0].transcript.trim();
+                            speechBase = geminiLive.mergeTranscriptText(speechBase, e.results[i][0].transcript.trim());
                         } else {
-                            interim += e.results[i][0].transcript;
+                            interim = geminiLive.mergeTranscriptText(interim, e.results[i][0].transcript);
                         }
                     }
 
@@ -6851,9 +6851,9 @@ return item;`
                     // Resolve o bug de eco acumulativo no Android
                     for (let i = e.resultIndex; i < e.results.length; i++) {
                         if (e.results[i].isFinal) {
-                            liveAccum += (liveAccum ? ' ' : '') + e.results[i][0].transcript.trim();
+                            liveAccum = geminiLive.mergeTranscriptText(liveAccum, e.results[i][0].transcript.trim());
                         } else {
-                            interim += e.results[i][0].transcript;
+                            interim = geminiLive.mergeTranscriptText(interim, e.results[i][0].transcript);
                         }
                     }
 
