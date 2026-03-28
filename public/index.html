@@ -5076,6 +5076,10 @@ return item;`
                 if (isLiveModel(model)) {
                     const apiKey = document.getElementById('api-in').value.trim();
                     if (!apiKey) { toast('⚠ Insira sua API Key!'); return; }
+                    if (pendingFiles.length) {
+                        toast('⚠ Gemini 3.1 Live aceita imagem nesse fluxo, mas não arquivo de texto/código/PDF anexado.');
+                        return;
+                    }
 
                     input.value = ''; autoH(input);
 
@@ -5130,7 +5134,7 @@ return item;`
                     geminiLive.sendTurn({
                         text,
                         images: imgsToSave,
-                        files: filesToSave
+                        files: []
                     });
                     return;
                 }
@@ -6372,26 +6376,47 @@ return item;`
 
                 sendTurn({ text = '', images = [], files = [] } = {}) {
                     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-                    const parts = [];
-                    if (text) parts.push({ text });
-                    (images || []).filter(img => img?.data).forEach(img => {
-                        parts.push({ inlineData: { mimeType: img.mimeType || 'image/png', data: img.data } });
-                    });
-                    (files || []).filter(file => file?.data).forEach(file => {
-                        parts.push({ inlineData: { mimeType: file.mimeType || 'application/octet-stream', data: file.data } });
-                    });
-                    if (!parts.length) return;
+                    const supportedImages = (images || []).filter(img =>
+                        img?.data && /^(image\/png|image\/jpeg)$/i.test(img.mimeType || '')
+                    );
+                    const rejectedImages = (images || []).filter(img =>
+                        img?.data && !/^(image\/png|image\/jpeg)$/i.test(img.mimeType || '')
+                    );
 
-                    const msg = {
-                        clientContent: {
-                            turns: [{
-                                role: 'user',
-                                parts
-                            }],
-                            turnComplete: true
-                        }
-                    };
-                    this.ws.send(JSON.stringify(msg));
+                    supportedImages.forEach(img => {
+                        this.ws.send(JSON.stringify({
+                            realtimeInput: {
+                                video: {
+                                    data: img.data,
+                                    mimeType: img.mimeType
+                                }
+                            }
+                        }));
+                    });
+
+                    if (text) {
+                        this.ws.send(JSON.stringify({
+                            realtimeInput: {
+                                text
+                            }
+                        }));
+                    }
+
+                    if (!text && supportedImages.length) {
+                        this.ws.send(JSON.stringify({
+                            realtimeInput: {
+                                text: 'Analise as imagens enviadas.'
+                            }
+                        }));
+                    }
+
+                    if (rejectedImages.length) {
+                        toast('⚠ No Gemini 3.1 Live, envie imagens JPG ou PNG.');
+                    }
+                    if (files?.length) {
+                        toast('⚠ Arquivos anexados fora de imagem não são suportados no Gemini 3.1 Live.');
+                    }
+                    if (!text && !supportedImages.length) return;
                     liveSetHUD('processing', '⏳ Processando…');
                 },
 
