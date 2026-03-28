@@ -16,6 +16,7 @@ const workspaceRootDir = join(__dirname, "workspace");
 const systemDir = join(workspaceRootDir, ".system");
 const usersFile = join(systemDir, "users.json");
 const userStateDir = join(systemDir, "state");
+const systemPromptsDir = join(systemDir, "system-prompts");
 const sessions = new Map();
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
@@ -138,6 +139,7 @@ async function ensureBaseDirs() {
   await mkdir(workspaceRootDir, { recursive: true });
   await mkdir(systemDir, { recursive: true });
   await mkdir(userStateDir, { recursive: true });
+  await mkdir(systemPromptsDir, { recursive: true });
   if (!existsSync(usersFile)) {
     await writeFile(usersFile, "[]\n", "utf8");
   }
@@ -171,6 +173,10 @@ function userRunsDir(user) {
 
 function userStateFile(user) {
   return join(userStateDir, `${user.id}.json`);
+}
+
+function systemPromptFilePath(id) {
+  return join(systemPromptsDir, `${sanitizeId(id)}.json`);
 }
 
 async function ensureUserDirs(user) {
@@ -340,6 +346,59 @@ async function loadUserState(user) {
 async function saveUserState(user, nextState) {
   await ensureUserDirs(user);
   await writeFile(userStateFile(user), `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+}
+
+function normalizeSystemPromptPayload(input, user, existing = null) {
+  if (!input || typeof input !== "object") {
+    throw new Error("Invalid system prompt payload");
+  }
+  const name = String(input.name || input.id || "").trim();
+  const prompt = String(input.prompt || input.content || "").trim();
+  const id = sanitizeId(input.id || name);
+  if (!id) throw new Error("System prompt id is required");
+  if (!name) throw new Error("System prompt name is required");
+  if (!prompt) throw new Error("System prompt content is required");
+
+  const now = new Date().toISOString();
+  return {
+    id,
+    name,
+    prompt,
+    created_at: existing?.created_at || now,
+    created_by: existing?.created_by || user.login,
+    updated_at: now,
+    updated_by: user.login
+  };
+}
+
+async function listSystemPrompts() {
+  await ensureBaseDirs();
+  const entries = await readdir(systemPromptsDir, { withFileTypes: true });
+  const items = [];
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    try {
+      const filePath = join(systemPromptsDir, entry.name);
+      const ext = extname(entry.name).toLowerCase();
+      let payload = null;
+      if (ext === ".json") {
+        payload = JSON.parse(await readFile(filePath, "utf8"));
+      } else if (ext === ".txt" || ext === ".md") {
+        const stem = entry.name.slice(0, -ext.length);
+        payload = {
+          id: sanitizeId(stem),
+          name: stem.replace(/[_-]+/g, " ").trim() || stem,
+          prompt: await readFile(filePath, "utf8")
+        };
+      }
+      if (!payload?.id || !payload?.name || !payload?.prompt) continue;
+      items.push(payload);
+    } catch (error) {
+      console.error(`Failed to load system prompt ${entry.name}:`, error.message);
+    }
+  }
+  items.sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "pt-BR"));
+  return items;
 }
 
 function executionDir(user, runId) {
@@ -1478,6 +1537,54 @@ async function handleSkillsApi(req, res, url, user) {
   sendJson(res, 405, { error: "Method not allowed" });
 }
 
+async function handleSystemPromptsApi(req, res, url, user) {
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type"
+    });
+    res.end();
+    return;
+  }
+
+  await ensureBaseDirs();
+
+  if (req.method === "GET" && url.pathname === "/api/system-prompts") {
+    sendJson(res, 200, { items: await listSystemPrompts() });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/system-prompts") {
+    const raw = await readRequestBody(req);
+    const payload = raw ? JSON.parse(raw) : {};
+    const filePath = systemPromptFilePath(payload.id || payload.name);
+    const existing = existsSync(filePath) ? JSON.parse(await readFile(filePath, "utf8")) : null;
+    const next = normalizeSystemPromptPayload(payload, user, existing);
+    await writeFile(filePath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+    sendJson(res, 200, { ok: true, item: next });
+    return;
+  }
+
+  if (req.method === "DELETE" && url.pathname.startsWith("/api/system-prompts/")) {
+    const id = sanitizeId(url.pathname.slice("/api/system-prompts/".length));
+    if (!id) {
+      sendJson(res, 400, { error: "System prompt id is required" });
+      return;
+    }
+    const filePath = systemPromptFilePath(id);
+    if (!existsSync(filePath)) {
+      sendJson(res, 404, { error: "System prompt not found" });
+      return;
+    }
+    await unlink(filePath);
+    sendJson(res, 200, { ok: true, id });
+    return;
+  }
+
+  sendJson(res, 405, { error: "Method not allowed" });
+}
+
 async function handleFsApi(req, res, url, user) {
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
@@ -1867,6 +1974,10 @@ const server = createServer(async (req, res) => {
       }
       if (url.pathname === "/api/exec" || url.pathname.startsWith("/api/exec/")) {
         await handleExecApi(req, res, url, authUser);
+        return;
+      }
+      if (url.pathname === "/api/system-prompts" || url.pathname.startsWith("/api/system-prompts/")) {
+        await handleSystemPromptsApi(req, res, url, authUser);
         return;
       }
       if (url.pathname.startsWith("/api/fs/")) {

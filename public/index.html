@@ -2404,6 +2404,14 @@
                     </div>
                     <div class="sg sg-wide">
                         <label>Persona / System Prompt</label>
+                        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+                            <select id="sysp-preset-sel" class="sel" style="min-width:220px;flex:1 1 240px" onchange="save()">
+                                <option value="">Preset compartilhado...</option>
+                            </select>
+                            <button type="button" class="action-btn" onclick="applySelectedSystemPrompt()">Aplicar</button>
+                            <button type="button" class="action-btn" onclick="saveCurrentSystemPromptPreset()">Salvar preset</button>
+                            <button type="button" class="action-btn" onclick="loadSystemPromptPresets()">↻ Atualizar</button>
+                        </div>
                         <textarea class="ta" id="sysp" oninput="save()"
                             placeholder="Ex: Você é um assistente com skills, function calling e foco em operações, arquivos, integrações e automações."></textarea>
                     </div>
@@ -4237,6 +4245,75 @@ return item;`
             var activeId = null;
             let ctrl = null;
             let pendingImages = [];
+            let systemPromptPresets = [];
+
+            function renderSystemPromptPresetOptions(selectedId = '') {
+                const sel = document.getElementById('sysp-preset-sel');
+                if (!sel) return;
+                const wanted = String(selectedId || '');
+                sel.innerHTML = '<option value="">Preset compartilhado...</option>' +
+                    systemPromptPresets.map(item => `<option value="${esc(item.id)}">${esc(item.name)}</option>`).join('');
+                sel.value = systemPromptPresets.some(item => item.id === wanted) ? wanted : '';
+            }
+
+            async function loadSystemPromptPresets(selectedId = null) {
+                try {
+                    const res = await fetch('/api/system-prompts');
+                    const data = await res.json();
+                    systemPromptPresets = Array.isArray(data.items) ? data.items : [];
+                    const cfg = readCfg();
+                    renderSystemPromptPresetOptions(selectedId ?? cfg.systemPromptPresetId || '');
+                } catch (error) {
+                    console.warn('[SystemPrompts] Falha ao carregar presets:', error);
+                    systemPromptPresets = [];
+                    renderSystemPromptPresetOptions('');
+                }
+            }
+
+            function applySelectedSystemPrompt() {
+                const sel = document.getElementById('sysp-preset-sel');
+                const promptBox = document.getElementById('sysp');
+                if (!sel || !promptBox) return;
+                const preset = systemPromptPresets.find(item => item.id === sel.value);
+                if (!preset) {
+                    toast('⚠ Selecione um preset compartilhado.');
+                    return;
+                }
+                promptBox.value = preset.prompt || '';
+                save();
+                toast(`✓ Preset aplicado: ${preset.name}`);
+            }
+
+            async function saveCurrentSystemPromptPreset() {
+                const promptBox = document.getElementById('sysp');
+                if (!promptBox || !promptBox.value.trim()) {
+                    toast('⚠ Escreva um system prompt antes de salvar.');
+                    return;
+                }
+                const currentId = document.getElementById('sysp-preset-sel')?.value || '';
+                const current = systemPromptPresets.find(item => item.id === currentId);
+                const suggested = current?.name || 'Novo preset compartilhado';
+                const name = window.prompt('Nome do preset compartilhado:', suggested);
+                if (!name || !name.trim()) return;
+                try {
+                    const res = await fetch('/api/system-prompts', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            id: currentId || undefined,
+                            name: name.trim(),
+                            prompt: promptBox.value
+                        })
+                    });
+                    const data = await res.json();
+                    if (!res.ok || !data?.item?.id) throw new Error(data?.error || 'erro desconhecido');
+                    await loadSystemPromptPresets(data.item.id);
+                    save();
+                    toast(`✓ Preset compartilhado salvo: ${data.item.name}`);
+                } catch (error) {
+                    toast('⚠ Falha ao salvar preset: ' + (error.message || 'erro desconhecido'));
+                }
+            }
 
             function save() {
                 const prev = readCfg();
@@ -4250,6 +4327,7 @@ return item;`
                     topk: document.getElementById('topk').value,
                     maxt: document.getElementById('maxt').value,
                     sysp: document.getElementById('sysp').value,
+                    systemPromptPresetId: document.getElementById('sysp-preset-sel')?.value || '',
                     think: isCodexModel(model) ? normalizeCodexReasoning(thinkValue, true) : thinkValue
                 };
 
@@ -4285,6 +4363,7 @@ return item;`
                 set('topk', s.topk, 'kv');
                 if (s.maxt) document.getElementById('maxt').value = s.maxt;
                 if (s.sysp) document.getElementById('sysp').value = s.sysp;
+                loadSystemPromptPresets(s.systemPromptPresetId || '');
                 syncThinkLevelOptions();
                 if (s.think !== undefined) {
                     document.getElementById('think-lvl').value = isCodexModel(document.getElementById('model-sel').value)
