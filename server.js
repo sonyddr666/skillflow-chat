@@ -1569,7 +1569,11 @@ async function handleFsApi(req, res, url, user) {
     const { rel, absolute } = workspacePath(user, payload.path);
     const createDirs = payload.create_dirs !== false && payload.create_dirs !== "false";
     if (createDirs) await mkdir(dirname(absolute), { recursive: true });
-    await writeFile(absolute, String(payload.content ?? ""), "utf8");
+    if (String(payload.encoding || "").trim().toLowerCase() === "base64") {
+      await writeFile(absolute, Buffer.from(String(payload.content || ""), "base64"));
+    } else {
+      await writeFile(absolute, String(payload.content ?? ""), "utf8");
+    }
     const stats = await lstat(absolute);
     sendJson(res, 200, {
       ok: true,

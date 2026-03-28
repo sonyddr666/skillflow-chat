@@ -800,6 +800,32 @@
             justify-content: flex-end;
         }
 
+        /* ── Live Streaming Bubbles ── */
+        .row.model .bub:has(.live-model-text) {
+            border-left: 3px solid var(--accent);
+            animation: live-pulse 1.5s ease-in-out infinite;
+        }
+        .row.user .bub:has(.live-user-text) {
+            border-right: 3px solid var(--accent2);
+            animation: live-pulse 1.5s ease-in-out infinite;
+        }
+        .live-model-text, .live-user-text {
+            white-space: pre-wrap;
+        }
+        .live-model-text::after, .live-user-text::after {
+            content: '▍';
+            animation: blink-caret 0.8s step-end infinite;
+            color: var(--accent);
+            font-weight: 300;
+        }
+        @keyframes live-pulse {
+            0%, 100% { border-color: var(--accent); }
+            50% { border-color: transparent; }
+        }
+        @keyframes blink-caret {
+            50% { opacity: 0; }
+        }
+
         .cp {
             background: none;
             border: none;
@@ -1715,6 +1741,44 @@
         }
 
 
+        /* ─ LIVE VOICE SELECTOR ─ */
+        .sg-live-voice {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .sg-live-voice label {
+            font-size: 11px;
+            color: var(--muted);
+        }
+
+        .sg-live-voice select {
+            background: var(--s2);
+            border: 1px solid var(--border);
+            color: var(--text);
+            border-radius: 7px;
+            padding: 5px 8px;
+            font-size: 12px;
+            outline: none;
+        }
+
+        .live-model-badge {
+            display: none;
+            background: #ff4757;
+            color: #fff;
+            font-size: 9px;
+            font-weight: 700;
+            padding: 2px 6px;
+            border-radius: 4px;
+            letter-spacing: .4px;
+            animation: livePulse 1.8s ease-in-out infinite;
+        }
+
+        .live-model-badge.on {
+            display: inline-block;
+        }
+
         /* ─ LIVE MODE ─ */
         #live-btn {
             background: none;
@@ -2244,16 +2308,17 @@
                             <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                             <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
                         </optgroup>
-                        <optgroup label="Gemini 2.0 Stable / Experimental">
-                            <option value="gemini-2.0-pro-exp">Gemini 2.0 Pro Exp</option>
+                        <optgroup label="Gemini 2.0 Stable">
                             <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
                             <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash-Lite</option>
-                            <option value="gemini-2.0-flash-thinking-exp">Gemini 2.0 Flash Thinking</option>
                         </optgroup>
                         <optgroup label="Gemini 3 Preview">
                             <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
                             <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
                             <option value="gemini-3.1-flash-lite-preview">Gemini 3.1 Flash-Lite Preview</option>
+                        </optgroup>
+                        <optgroup label="🔴 Gemini Live (Multimodal Nativo)">
+                            <option value="gemini-3.1-flash-live-preview">🔴 Gemini 3.1 Flash Live</option>
                         </optgroup>
                         <optgroup label="Gemini 1.5 Legacy">
                             <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
@@ -2271,6 +2336,7 @@
                 <button id="cfg-btn" onclick="toggleCfg()">⚙ Config</button>
                 <button id="plugin-btn" onclick="togglePlugins()" title="Skills e plugins">🔌 Skills</button>
                 <button id="theme-btn" onclick="toggleTheme()" title="Alternar Tema">🌙</button>
+                <span class="live-model-badge" id="live-model-badge">LIVE</span>
                 <button id="tb-expand" onclick="document.getElementById('topbar').classList.toggle('tb-expanded')" title="Mais opções">⋯</button>
             </div>
 
@@ -2315,7 +2381,7 @@
                         <textarea class="ta" id="sysp" oninput="save()"
                             placeholder="Ex: Você é um assistente com skills, function calling e foco em operações, arquivos, integrações e automações."></textarea>
                     </div>
-                    <div class="sg sg-tts">
+                    <div class="sg sg-tts" id="tts-voice-grp">
                         <label>🔊 TTS — Voz de saída</label>
                         <select id="tts-voice-sel" onchange="saveTTSCfg()">
                             <option value="">Carregando vozes…</option>
@@ -2335,6 +2401,20 @@
                         <input type="text" id="tts-voice-manual" placeholder="default--xxx__voicename"
                             style="background:var(--s2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 8px;font-size:11px;font-family:monospace;outline:none"
                             oninput="const s=document.getElementById('tts-voice-sel');if(s&&this.value){const o=document.createElement('option');o.value=this.value;o.textContent='✏ '+this.value.split('__').pop();o.selected=true;s.insertBefore(o,s.firstChild);saveTTSCfg();}">
+                    </div>
+                    <div class="sg sg-live-voice" id="live-voice-grp" style="display:none">
+                        <label>🔴 Live Voice — Voz nativa do Gemini Live</label>
+                        <select id="live-voice-sel" onchange="saveLiveVoiceCfg()">
+                            <option value="Puck">Puck (Masculino, Energético)</option>
+                            <option value="Charon">Charon (Masculino, Grave)</option>
+                            <option value="Kore">Kore (Feminino, Suave)</option>
+                            <option value="Fenrir">Fenrir (Masculino, Profundo)</option>
+                            <option value="Aoede">Aoede (Feminino, Claro)</option>
+                            <option value="Leda">Leda (Feminino, Jovem)</option>
+                            <option value="Orus">Orus (Masculino, Neutro)</option>
+                            <option value="Zephyr">Zephyr (Não-binário)</option>
+                        </select>
+                        <span style="font-size:10px;color:var(--accent2);margin-top:2px">Vozes nativas do Gemini — áudio bidirecional sem TTS externo</span>
                     </div>
                 </div>
             </div>
@@ -2509,7 +2589,23 @@
                 }
             });
 
-            const G3 = ['gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview'];
+            const G3 = ['gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview', 'gemini-3.1-flash-live-preview'];
+
+            function isLiveModel(model) {
+                return String(model || '').includes('-live-');
+            }
+
+            function saveLiveVoiceCfg() {
+                const voice = document.getElementById('live-voice-sel')?.value || 'Puck';
+                setStorageItem('gc_live_voice', voice, { silent: true });
+            }
+
+            function loadLiveVoiceCfg() {
+                const voice = localStorage.getItem('gc_live_voice') || 'Puck';
+                const sel = document.getElementById('live-voice-sel');
+                if (sel) sel.value = voice;
+            }
+
             const CODEX_MODELS = [
                 { value: 'gpt-5.4', label: 'GPT-5.4' },
                 { value: 'gpt-5.4-mini', label: 'GPT-5.4-Mini' },
@@ -2551,7 +2647,7 @@
                 altissimo: 'xhigh',
                 'altíssimo': 'xhigh'
             };
-            const supportsThinking = m => G3.some(x => String(m || '').startsWith(x.replace('-preview', ''))) || String(m || '').includes('2.5') || String(m || '').includes('2.0-flash-thinking');
+            const supportsThinking = m => G3.some(x => String(m || '').startsWith(x.replace('-preview', ''))) || String(m || '').includes('2.5');
 
             function isCodexModel(model) {
                 return CODEX_MODELS.some(item => item.value === String(model || ''));
@@ -2593,8 +2689,32 @@
                 }
             }
 
+            function isQuotaExceededError(error) {
+                return error?.name === 'QuotaExceededError'
+                    || error?.name === 'NS_ERROR_DOM_QUOTA_REACHED'
+                    || error?.code === 22
+                    || error?.code === 1014;
+            }
+
+            function setStorageItem(key, value, options = {}) {
+                try {
+                    localStorage.setItem(key, value);
+                    return true;
+                } catch (error) {
+                    if (!isQuotaExceededError(error)) {
+                        console.warn(`[Storage] Falha ao salvar ${key}:`, error);
+                        return false;
+                    }
+                    if (typeof options.onQuota === 'function') {
+                        return options.onQuota(error) === true;
+                    }
+                    if (!options.silent) toast('⚠ Armazenamento local cheio.');
+                    return false;
+                }
+            }
+
             function writeCfg(cfg) {
-                localStorage.setItem('gc_cfg', JSON.stringify(cfg));
+                setStorageItem('gc_cfg', JSON.stringify(cfg), { silent: true });
             }
 
             function ensureCodexModels() {
@@ -3221,7 +3341,7 @@ const bag = JSON.parse(localStorage.getItem('gc_user_memory') || '{}');
 const ns = args.namespace || 'user';
 if (!bag[ns]) bag[ns] = {};
 bag[ns][args.key] = { value: args.value, updated_at: new Date().toISOString() };
-localStorage.setItem('gc_user_memory', JSON.stringify(bag));
+                setStorageItem('gc_user_memory', JSON.stringify(bag), { silent: true });
 return { ok: true, namespace: ns, key: args.key, stored: bag[ns][args.key] };`
                 },
                 {
@@ -3265,7 +3385,7 @@ const item = {
   conversation: convs[activeId]?.title || ''
 };
 approvals.unshift(item);
-localStorage.setItem('gc_pending_approvals', JSON.stringify(approvals));
+                setStorageItem('gc_pending_approvals', JSON.stringify(approvals), { silent: true });
 return item;`
                 },
                 {
@@ -3391,7 +3511,7 @@ return item;`
             }
 
             function savePlugins(syncServer = true) {
-                localStorage.setItem('gc_plugins', JSON.stringify(plugins));
+                setStorageItem('gc_plugins', JSON.stringify(plugins), { silent: true });
             }
 
             function buildTools() {
@@ -3681,6 +3801,18 @@ return item;`
                     if (v.required) req.push(k);
                 });
                 return { type: 'OBJECT', properties: props, ...(req.length ? { required: req } : {}) };
+            }
+
+            // Recursively lowercase all "type" values in a schema (for Live API / raw WebSocket)
+            function lowercaseTypes(obj) {
+                if (!obj || typeof obj !== 'object') return obj;
+                if (Array.isArray(obj)) return obj.map(lowercaseTypes);
+                const out = {};
+                for (const [k, v] of Object.entries(obj)) {
+                    if (k === 'type' && typeof v === 'string') out[k] = v.toLowerCase();
+                    else out[k] = lowercaseTypes(v);
+                }
+                return out;
             }
 
             function normalizeOpenAISchemaNode(value) {
@@ -3992,7 +4124,7 @@ return item;`
                 const next = current === 'dark' ? 'light' : 'dark';
                 html.setAttribute('data-theme', next);
                 document.getElementById('theme-btn').textContent = next === 'dark' ? '🌙' : '☀️';
-                localStorage.setItem('gc_theme', next);
+                setStorageItem('gc_theme', next, { silent: true });
                 initMermaid();
                 // Re-render mermaid diagrams with new theme
                 document.querySelectorAll('.mermaid[data-rendered]').forEach(el => {
@@ -4028,7 +4160,7 @@ return item;`
                 const isCollapsed = sb.classList.contains('collapsed');
                 // Toggle body class so sb-btn shows via CSS when sidebar is hidden
                 document.body.classList.toggle('sb-collapsed', isCollapsed);
-                localStorage.setItem('gc_sb_collapsed', isCollapsed ? '1' : '0');
+                setStorageItem('gc_sb_collapsed', isCollapsed ? '1' : '0', { silent: true });
             }
 
             // ─ SETTINGS ─
@@ -4046,9 +4178,18 @@ return item;`
             }
 
             function onModelChange() {
+                const model = document.getElementById('model-sel').value;
+                const live = isLiveModel(model);
                 syncThinkLevelOptions();
                 applyThinkVisibility();
                 syncProviderInput();
+                // Toggle TTS vs Live voice sections
+                const ttsGrp = document.getElementById('tts-voice-grp');
+                const liveGrp = document.getElementById('live-voice-grp');
+                if (ttsGrp) ttsGrp.style.display = live ? 'none' : '';
+                if (liveGrp) liveGrp.style.display = live ? '' : 'none';
+                // Toggle LIVE badge in topbar
+                document.getElementById('live-model-badge')?.classList.toggle('on', live);
                 save();
             }
 
@@ -4113,6 +4254,15 @@ return item;`
                 }
                 applyThinkVisibility();
                 syncProviderInput();
+                loadLiveVoiceCfg();
+                // Apply live model visibility
+                const currentModel = document.getElementById('model-sel').value;
+                const isLive = isLiveModel(currentModel);
+                const ttsGrp = document.getElementById('tts-voice-grp');
+                const liveGrp = document.getElementById('live-voice-grp');
+                if (ttsGrp) ttsGrp.style.display = isLive ? 'none' : '';
+                if (liveGrp) liveGrp.style.display = isLive ? '' : 'none';
+                document.getElementById('live-model-badge')?.classList.toggle('on', isLive);
             }
 
             // ─ EXPORT / IMPORT ─
@@ -4399,9 +4549,69 @@ return item;`
             }
 
             // ─ CONVERSATIONS ─
+            function compactConversationsForStorage(source) {
+                if (!source || typeof source !== 'object' || Array.isArray(source)) return {};
+                const compacted = {};
+                for (const [id, conversation] of Object.entries(source)) {
+                    if (!conversation || typeof conversation !== 'object') continue;
+                    const msgs = conversationMessages(conversation).map(message => {
+                        if (!message || typeof message !== 'object') return message;
+                        const nextMessage = { ...message };
+
+                        if (Array.isArray(message.imgs)) {
+                            nextMessage.imgs = message.imgs.filter(Boolean).map((img, index) => ({
+                                mimeType: img?.mimeType || 'image/*',
+                                name: img?.name || `imagem-${index + 1}`,
+                                path: img?.path || '',
+                                downloadUrl: img?.downloadUrl || '',
+                                omitted: true
+                            }));
+                        }
+
+                        if (Array.isArray(message.files)) {
+                            nextMessage.files = message.files.filter(Boolean).map(file => ({
+                                name: file?.name || 'arquivo',
+                                mimeType: file?.mimeType || file?.type || '',
+                                path: file?.path || '',
+                                downloadUrl: file?.downloadUrl || ''
+                            }));
+                        }
+
+                        return nextMessage;
+                    });
+
+                    compacted[id] = { ...conversation, msgs };
+                }
+                return compacted;
+            }
+
+            function reduceConversationsForStorage(source, maxConversations = 15, maxMessagesPerConversation = 60) {
+                const compacted = compactConversationsForStorage(source);
+                const ordered = Object.entries(compacted)
+                    .sort(([, a], [, b]) => conversationTs(b) - conversationTs(a))
+                    .slice(0, maxConversations);
+                const reduced = {};
+                for (const [id, conversation] of ordered) {
+                    const msgs = conversationMessages(conversation);
+                    reduced[id] = {
+                        ...conversation,
+                        msgs: msgs.length > maxMessagesPerConversation
+                            ? msgs.slice(-maxMessagesPerConversation)
+                            : msgs
+                    };
+                }
+                return reduced;
+            }
+
             function saveConvs() {
-                try { localStorage.setItem('gc_convs', JSON.stringify(convs)); }
-                catch (e) { toast('⚠ LocalStorage cheio!'); }
+                const compacted = compactConversationsForStorage(convs);
+                const saved = setStorageItem('gc_convs', JSON.stringify(compacted), {
+                    silent: true,
+                    onQuota: () => setStorageItem('gc_convs', JSON.stringify(reduceConversationsForStorage(convs)), { silent: true })
+                });
+                if (!saved) {
+                    toast('⚠ Armazenamento local cheio. O navegador reduziu o histórico salvo.');
+                }
             }
             function newConversation() {
                 // Prevent creating multiple empty conversations
@@ -4589,16 +4799,16 @@ return item;`
                         continue;
                     }
                     const isImage = file.type.startsWith('image/');
-                    const reader = new FileReader();
-                    reader.onload = (evt) => {
-                        const base64 = evt.target.result.split(',')[1];
-                        if (isImage) {
-                            pendingImages.push({ mimeType: file.type, data: base64, url: evt.target.result });
-                        } else {
-                            pendingFiles.push({ mimeType: file.type, data: base64, name: file.name, url: evt.target.result });
-                        }
-                        renderImagePreview();
-                    };
+                        const reader = new FileReader();
+                        reader.onload = (evt) => {
+                            const base64 = evt.target.result.split(',')[1];
+                            if (isImage) {
+                                pendingImages.push({ name: file.name, mimeType: file.type, data: base64, url: evt.target.result });
+                            } else {
+                                pendingFiles.push({ mimeType: file.type, data: base64, name: file.name, url: evt.target.result });
+                            }
+                            renderImagePreview();
+                        };
                     reader.readAsDataURL(file);
                 }
                 e.target.value = '';
@@ -4631,6 +4841,60 @@ return item;`
                 renderImagePreview();
             }
 
+            function sanitizeUploadName(name, fallback = 'arquivo') {
+                const cleaned = String(name || fallback)
+                    .replace(/[\\/:*?"<>|]+/g, '_')
+                    .replace(/\s+/g, '-')
+                    .replace(/-+/g, '-')
+                    .replace(/^-+|-+$/g, '')
+                    .slice(0, 120);
+                return cleaned || fallback;
+            }
+
+            async function persistPendingAttachments(items, folder) {
+                const now = new Date();
+                const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+                const persisted = [];
+
+                for (let index = 0; index < items.length; index += 1) {
+                    const item = items[index];
+                    if (!item?.data) {
+                        persisted.push(item);
+                        continue;
+                    }
+
+                    const prefix = `${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+                    const fileName = sanitizeUploadName(item.name || `${folder}-${prefix}`);
+                    const path = `.uploads/${stamp}/${folder}/${prefix}-${fileName}`;
+                    const res = await fetch('/api/fs/write', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            path,
+                            content: item.data,
+                            encoding: 'base64',
+                            create_dirs: true
+                        })
+                    });
+
+                    let data = null;
+                    try { data = await res.json(); } catch (_) { }
+                    if (!res.ok || !data?.ok) {
+                        throw new Error(data?.error || `Falha ao salvar ${fileName}`);
+                    }
+
+                    persisted.push({
+                        name: item.name || fileName,
+                        mimeType: item.mimeType || '',
+                        path: data.path,
+                        downloadUrl: '/api/fs/download?path=' + encodeURIComponent(data.path),
+                        data: item.data
+                    });
+                }
+
+                return persisted;
+            }
+
             function renderMessageFile(file, role) {
                 const href = buildMessageFileDownloadUrl(file);
                 const action = href
@@ -4655,7 +4919,14 @@ return item;`
                 let body = '';
 
                 if (m.imgs && m.imgs.length > 0) {
-                    body += `<div class="attached-imgs">${m.imgs.map(img => `<img src="data:${img.mimeType};base64,${img.data}">`).join('')}</div>`;
+                    body += `<div class="attached-imgs">${m.imgs.map(img => {
+                        const src = img?.data
+                            ? `data:${img.mimeType};base64,${img.data}`
+                            : (img?.downloadUrl || (img?.path ? '/api/fs/download?path=' + encodeURIComponent(img.path) : ''));
+                        return src
+                            ? `<img src="${src}">`
+                            : `<div class="file-preview"><span class="file-icon">🖼️</span><span>${esc(img?.name || 'Imagem anexada')}</span></div>`;
+                    }).join('')}</div>`;
                 }
                 if (false && m.files && m.files.length > 0) {
                     body += `<div class="attached-imgs">${m.files.map(f => `<div class="file-preview"><span class="file-icon">${f.type === 'application/pdf' ? '📄' : '📝'}</span><span>${esc(f.name)}</span></div>`).join('')}</div>`;
@@ -4690,6 +4961,7 @@ return item;`
         <span>${t}</span>
         ${m.model ? `<span style="color:var(--accent2)">${m.model}</span>` : ''}
         ${m.think ? `<span class="tbadge">thinking:${m.think}</span>` : ''}
+        ${m.live ? `<span style="background:#ff4757;color:#fff;font-size:9px;padding:1px 5px;border-radius:3px;font-weight:700">LIVE</span>` : ''}
         ${m.tok ? `<span>${m.tok.toLocaleString()} tok</span>` : ''}
         <button class="cp" onclick="copyMsg(${i})">⎘ Copiar Tudo</button>
         ${m.role === 'model' ? `<button class="tts-btn" onclick="ttsSpeakMsg(${i})" id="tts-btn-${i}" title="Ouvir resposta">🔊</button>` : ''}
@@ -4791,6 +5063,45 @@ return item;`
                 if (!text && pendingImages.length === 0 && pendingFiles.length === 0) return;
 
                 const model = document.getElementById('model-sel').value;
+
+                // ═══ Live model: text must go via WebSocket (no REST support) ═══
+                if (isLiveModel(model)) {
+                    if (!text) return;
+                    const apiKey = document.getElementById('api-in').value.trim();
+                    if (!apiKey) { toast('⚠ Insira sua API Key!'); return; }
+
+                    input.value = ''; autoH(input);
+
+                    // Flush pending voice transcripts BEFORE adding text (preserves chronological order)
+                    if (geminiLive.active && (geminiLive.pendingTranscript.trim() || geminiLive.pendingUserTranscript.trim())) {
+                        geminiLive.onTurnComplete();
+                    }
+
+                    // Log user text message
+                    convs[activeId].msgs.push({ role: 'user', text, ts: Date.now() });
+                    if (convs[activeId].msgs.length === 1) {
+                        convs[activeId].title = text.slice(0, 48) + (text.length > 48 ? '…' : '');
+                    }
+                    saveConvs(); renderSidebar(); renderChat();
+
+                    // Auto-connect WebSocket if not active
+                    if (!geminiLive.active) {
+                        try {
+                            liveMode = true;
+                            document.getElementById('live-btn')?.classList.add('on');
+                            await geminiLive.connect(apiKey, model);
+                        } catch (err) {
+                            liveMode = false;
+                            document.getElementById('live-btn')?.classList.remove('on');
+                            toast('❌ Falha ao conectar Live: ' + (err.message || ''));
+                            return;
+                        }
+                    }
+
+                    geminiLive.sendText(text);
+                    return;
+                }
+
                 const usingCodex = isCodexModel(model);
                 let apiKey = '';
                 let codexAuth = null;
@@ -4806,11 +5117,22 @@ return item;`
 
                 input.value = ''; autoH(input);
 
-                const imgsToSave = [...pendingImages];
-                const filesToSave = [...pendingFiles];
+                let imgsToSave = [...pendingImages];
+                let filesToSave = [...pendingFiles];
                 pendingImages = [];
                 pendingFiles = [];
                 renderImagePreview();
+
+                try {
+                    imgsToSave = await persistPendingAttachments(imgsToSave, 'images');
+                    filesToSave = await persistPendingAttachments(filesToSave, 'files');
+                } catch (error) {
+                    pendingImages = imgsToSave;
+                    pendingFiles = filesToSave;
+                    renderImagePreview();
+                    toast('⚠ Falha ao salvar anexos do usuário: ' + (error.message || 'erro desconhecido'));
+                    return;
+                }
 
                 const msgData = { role: 'user', text, imgs: imgsToSave, ts: Date.now() };
                 if (filesToSave.length) msgData.files = filesToSave;
@@ -4860,15 +5182,21 @@ return item;`
                     const parts = [];
                     const hasImgs = m.imgs?.length > 0;
                     const hasFiles = m.files?.length > 0;
+                    const imagePayloads = hasImgs ? m.imgs.filter(img => img?.data) : [];
+                    const filePayloads = hasFiles ? m.files.filter(f => f?.data) : [];
 
                     if ((hasImgs || hasFiles) && imgMsgIndices.has(i)) {
                         if (m.text) parts.push({ text: m.text });
-                        if (hasImgs) m.imgs.forEach(img => {
+                        if (imagePayloads.length) imagePayloads.forEach(img => {
                             parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
                         });
-                        if (hasFiles) m.files.forEach(f => {
+                        if (filePayloads.length) filePayloads.forEach(f => {
                             parts.push({ inlineData: { mimeType: f.mimeType, data: f.data } });
                         });
+                        if (!imagePayloads.length && !filePayloads.length) {
+                            const count = (m.imgs?.length || 0) + (m.files?.length || 0);
+                            parts.push({ text: `[${count} arquivo(s) salvo(s) no workspace do usuário]` });
+                        }
                     } else if ((hasImgs || hasFiles) && !imgMsgIndices.has(i)) {
                         const count = (m.imgs?.length || 0) + (m.files?.length || 0);
                         const note = `[${count} arquivo(s) enviado(s) — omitido(s) do contexto]`;
@@ -5184,7 +5512,7 @@ return item;`
                         const reader = new FileReader();
                         reader.onload = evt => {
                             const base64 = evt.target.result.split(',')[1];
-                            pendingImages.push({ mimeType: file.type, data: base64, url: evt.target.result });
+                            pendingImages.push({ name: file.name || 'imagem-colada.png', mimeType: file.type, data: base64, url: evt.target.result });
                             renderImagePreview();
                             toast('📋 Imagem colada!');
                             document.getElementById('msg').focus();
@@ -5263,7 +5591,7 @@ return item;`
 
             function setMicPermissionState(state) {
                 micPermissionState = state;
-                localStorage.setItem('gc_mic_permission', state);
+                setStorageItem('gc_mic_permission', state, { silent: true });
             }
 
             async function ensureMicPermission() {
@@ -5379,6 +5707,7 @@ return item;`
                         stopSpeech();
                         return;
                     }
+                    if (e.error === 'no-speech') return;
                     if (e.error === 'aborted') return; // Ignore user-initiated abort
                     // Catch-all for unknown errors
                     console.warn('[STT] Erro não tratado:', e.error, e);
@@ -5444,6 +5773,7 @@ return item;`
             }
 
             window.addEventListener('beforeunload', () => {
+                if (geminiLive.active) geminiLive.disconnect();
                 if (!micStream) return;
                 micStream.getTracks().forEach(track => track.stop());
                 micStream = null;
@@ -5469,8 +5799,8 @@ return item;`
             function saveTTSCfg() {
                 const voice = document.getElementById('tts-voice-sel')?.value || '';
                 const autoplay = document.getElementById('tts-autoplay')?.checked || false;
-                localStorage.setItem('gc_tts_voice', voice);
-                localStorage.setItem('gc_tts_autoplay', autoplay ? '1' : '0');
+                setStorageItem('gc_tts_voice', voice, { silent: true });
+                setStorageItem('gc_tts_autoplay', autoplay ? '1' : '0', { silent: true });
             }
 
             function loadTTSCfg() {
@@ -5657,21 +5987,467 @@ return item;`
 
 
             // ─══════════════════════════════════════════════════════════════
-            // LIVE MODE — Conversa de voz contínua
+            // LIVE MODE — Conversa de voz contínua (dual engine)
             // ─══════════════════════════════════════════════════════════════
             let liveMode = false;
             let liveState = 'idle';
             let liveSilenceTimer = null;
             let liveBarInterval = null;
             let liveSilenceStart = null;
-            let liveRecognition = null;   // persiste durante toda a sessão live (evita repedir permissão)
+            let liveRecognition = null;
             let liveRecognitionActive = false;
-            let liveIgnoreSTT = false;  // true durante processing/playing
+            let liveIgnoreSTT = false;
             let liveSpeakResolver = null;
             let liveAccum = '';
             let liveLastDisplay = '';
             let liveIgnoreUntil = 0;
             const LIVE_SILENCE_MS = 3000;
+
+            // ─══════════════════════════════════════════════════════════════
+            // GEMINI LIVE — Native Multimodal WebSocket Engine
+            // ─══════════════════════════════════════════════════════════════
+            const geminiLive = {
+                ws: null,
+                captureCtx: null,
+                playbackCtx: null,
+                mediaStream: null,
+                scriptNode: null,
+                sourceNode: null,
+                active: false,
+                sessionModel: '',
+                playbackScheduledTime: 0,
+                pendingTranscript: '',
+                pendingUserTranscript: '',
+                liveStreamingEl: null,
+                liveUserBubble: null,
+                turnId: 0,
+
+                async connect(apiKey, model) {
+                    if (this.active) this.disconnect();
+                    this.sessionModel = model;
+                    liveSetHUD('processing', '🔄 Conectando ao Gemini Live…');
+
+                    const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+
+                    return new Promise((resolve, reject) => {
+                        let settled = false;
+                        const ws = new WebSocket(url);
+                        this.ws = ws;
+
+                        ws.onopen = () => {
+                            const sysp = document.getElementById('sysp')?.value?.trim() || '';
+                            const liveVoice = document.getElementById('live-voice-sel')?.value || 'Puck';
+
+                            // Build tools with lowercase types (SDK format)
+                            const liveTools = [];
+                            liveTools.push({ googleSearch: {} });
+                            const enabled = plugins.filter(p => p.enabled);
+                            if (enabled.length) {
+                                liveTools.push({
+                                    functionDeclarations: enabled.map(p => ({
+                                        name: p.name,
+                                        description: p.description,
+                                        parameters: lowercaseTypes(normalizeParams(p.parameters))
+                                    }))
+                                });
+                            }
+
+                            const setup = {
+                                setup: {
+                                    model: `models/${model}`,
+                                    generationConfig: {
+                                        responseModalities: ['AUDIO'],
+                                        speechConfig: {
+                                            voiceConfig: {
+                                                prebuiltVoiceConfig: { voiceName: liveVoice }
+                                            }
+                                        }
+                                    },
+                                    outputAudioTranscription: {},
+                                    inputAudioTranscription: {}
+                                }
+                            };
+
+                            // System instruction
+                            if (sysp) {
+                                setup.setup.systemInstruction = { parts: [{ text: sysp }] };
+                            }
+
+                            // Tools
+                            if (liveTools.length) {
+                                setup.setup.tools = liveTools;
+                            }
+
+                            console.log('[GeminiLive] Setup:', JSON.stringify(setup, null, 2));
+                            ws.send(JSON.stringify(setup));
+                        };
+
+                        ws.onmessage = async (event) => {
+                            try {
+                                let raw = event.data;
+                                if (raw instanceof Blob) {
+                                    raw = await raw.text();
+                                }
+                                const msg = JSON.parse(raw);
+                                this.handleMessage(msg, () => {
+                                    if (!settled) { settled = true; resolve(); }
+                                });
+                            } catch (e) {
+                                console.error('[GeminiLive] Parse error:', e);
+                            }
+                        };
+
+                        ws.onerror = (e) => {
+                            console.error('[GeminiLive] WebSocket error:', e);
+                            if (!settled) { settled = true; reject(e); }
+                            this.disconnect();
+                            toast('❌ Erro na conexão Live');
+                        };
+
+                        ws.onclose = (e) => {
+                            console.log('[GeminiLive] Closed:', e.code, e.reason);
+                            if (this.active) {
+                                this.active = false;
+                                liveMode = false;
+                                liveSetHUD('idle', '');
+                                document.getElementById('live-btn')?.classList.remove('on');
+                                toast('🔴 Sessão Live encerrada');
+                            }
+                            if (!settled) { settled = true; reject(new Error(`WebSocket closed: ${e.code} ${e.reason}`)); }
+                        };
+
+                        setTimeout(() => {
+                            if (!settled) { settled = true; reject(new Error('Timeout')); this.disconnect(); }
+                        }, 15000);
+                    });
+                },
+
+                handleMessage(msg, onSetup) {
+                    // Setup complete
+                    if (msg.setupComplete) {
+                        this.active = true;
+                        liveSetHUD('listening', '🎙 Gemini Live Ativo — Fale!');
+                        this.startAudioCapture();
+                        if (onSetup) onSetup();
+                        return;
+                    }
+
+                    // Server content (audio, transcriptions, turn control)
+                    if (msg.serverContent) {
+                        const sc = msg.serverContent;
+
+                        // Interrupted by user (barge-in)
+                        if (sc.interrupted) {
+                            this.clearPlayback();
+                            // Save partial transcripts before resetting
+                            if ((this.pendingUserTranscript.trim() || this.pendingTranscript.trim()) && activeId) {
+                                this.onTurnComplete();
+                            }
+                            this.pendingTranscript = '';
+                            this.pendingUserTranscript = '';
+                            this.liveStreamingEl = null;
+                            this.liveUserBubble = null;
+                            liveSetHUD('listening', '🎙 Interrompido — Ouvindo…');
+                            return;
+                        }
+
+                        // Audio data from model
+                        const parts = sc.modelTurn?.parts || [];
+                        for (const part of parts) {
+                            if (part.inlineData?.mimeType?.includes('audio/pcm')) {
+                                liveSetHUD('playing', '🔊 Respondendo…');
+                                this.queueAudio(part.inlineData.data);
+                            }
+                        }
+
+                        // Input transcription — what the USER said (speech-to-text)
+                        if (sc.inputTranscription?.text) {
+                            const userText = sc.inputTranscription.text;
+                            console.log('[GeminiLive] InputTranscription:', userText);
+                            this.pendingUserTranscript += userText;
+
+                            // Show user speech in real-time
+                            if (!activeId) newConversation();
+                            if (!this.liveUserBubble) {
+                                const chatEl = document.getElementById('chat');
+                                if (chatEl) {
+                                    const div = document.createElement('div');
+                                    div.className = 'row user animate-in';
+                                    div.innerHTML = `<div class="av">👤</div><div style="flex:1; max-width: calc(100% - 42px);"><div class="bub"><p class="live-user-text"></p></div><div class="meta"><span>${new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}</span> <span style="background:#ff4757;color:#fff;font-size:9px;padding:1px 5px;border-radius:3px;font-weight:700">LIVE</span></div></div>`;
+                                    chatEl.appendChild(div);
+                                    this.liveUserBubble = div.querySelector('.live-user-text');
+                                    chatEl.scrollTop = chatEl.scrollHeight;
+                                }
+                            }
+                            if (this.liveUserBubble) {
+                                this.liveUserBubble.textContent = this.pendingUserTranscript;
+                                document.getElementById('chat').scrollTop = document.getElementById('chat').scrollHeight;
+                            }
+                        }
+
+                        // Output transcription — stream model text in real-time
+                        if (sc.outputTranscription?.text) {
+                            const modelText = sc.outputTranscription.text;
+                            console.log('[GeminiLive] OutputTranscription:', modelText);
+                            this.pendingTranscript += modelText;
+
+                            // Show model response text in real-time
+                            if (!activeId) newConversation();
+                            if (!this.liveStreamingEl) {
+                                // Close user bubble when model starts responding
+                                this.liveUserBubble = null;
+
+                                const chatEl = document.getElementById('chat');
+                                if (chatEl) {
+                                    const div = document.createElement('div');
+                                    div.className = 'row model animate-in';
+                                    div.innerHTML = `<div class="av">✦</div><div style="flex:1; max-width: calc(100% - 42px);"><div class="bub"><p class="live-model-text"></p></div><div class="meta"><span>${new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}</span> <span style="color:var(--accent2)">${this.sessionModel || 'gemini-3.1-flash-live-preview'}</span> <span style="background:#ff4757;color:#fff;font-size:9px;padding:1px 5px;border-radius:3px;font-weight:700">LIVE</span></div></div>`;
+                                    chatEl.appendChild(div);
+                                    this.liveStreamingEl = div.querySelector('.live-model-text');
+                                    chatEl.scrollTop = chatEl.scrollHeight;
+                                }
+                            }
+                            if (this.liveStreamingEl) {
+                                this.liveStreamingEl.textContent = this.pendingTranscript;
+                                document.getElementById('chat').scrollTop = document.getElementById('chat').scrollHeight;
+                            }
+                        }
+
+                        if (sc.turnComplete) {
+                            this.onTurnComplete();
+                        }
+                        return;
+                    }
+
+                    // Tool call
+                    if (msg.toolCall) {
+                        this.handleToolCall(msg.toolCall);
+                        return;
+                    }
+                },
+
+                async handleToolCall(toolCall) {
+                    const fcs = toolCall.functionCalls || [];
+                    if (!fcs.length) return;
+
+                    const names = fcs.map(fc => fc.name).join(', ');
+                    liveSetHUD('processing', `⚙ ${names}`);
+
+                    const results = await Promise.all(
+                        fcs.map(fc => executePlugin(fc.name, fc.args || {}))
+                    );
+
+                    // Log tool calls to chat
+                    if (activeId) {
+                        const toolText = fcs.map((fc, i) => {
+                            const argStr = Object.entries(fc.args || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ');
+                            const resultStr = JSON.stringify(results[i]).slice(0, 500);
+                            return `🔧 **${fc.name}**(${argStr})\n\`\`\`json\n${resultStr}\n\`\`\``;
+                        }).join('\n\n');
+                        convs[activeId].msgs.push({
+                            role: 'model', text: toolText, ts: Date.now(),
+                            model: this.sessionModel, live: true
+                        });
+                        saveConvs(); renderChat();
+                    }
+
+                    const response = {
+                        toolResponse: {
+                            functionResponses: fcs.map((fc, i) => ({
+                                name: fc.name,
+                                id: fc.id,
+                                response: results[i]
+                            }))
+                        }
+                    };
+
+                    if (this.ws?.readyState === WebSocket.OPEN) {
+                        this.ws.send(JSON.stringify(response));
+                    }
+                },
+
+                sendText(text) {
+                    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+                    // realtimeInput.text — matches SDK's sendRealtimeInput({text})
+                    const msg = {
+                        realtimeInput: {
+                            text: text
+                        }
+                    };
+                    this.ws.send(JSON.stringify(msg));
+                    liveSetHUD('processing', '⏳ Processando…');
+                },
+
+                onTurnComplete() {
+                    if (!activeId) newConversation();
+
+                    // Save user speech transcript (what they said via mic)
+                    if (this.pendingUserTranscript.trim()) {
+                        convs[activeId].msgs.push({
+                            role: 'user',
+                            text: this.pendingUserTranscript.trim(),
+                            ts: Date.now(),
+                            live: true
+                        });
+                        // Auto-title from first user speech
+                        const userMsgs = convs[activeId].msgs.filter(m => m.role === 'user');
+                        if (userMsgs.length === 1) {
+                            const t = this.pendingUserTranscript.trim();
+                            convs[activeId].title = t.slice(0, 48) + (t.length > 48 ? '…' : '');
+                        }
+                    }
+                    this.pendingUserTranscript = '';
+
+                    // Save model speech transcript (what the model said)
+                    if (this.pendingTranscript.trim()) {
+                        convs[activeId].msgs.push({
+                            role: 'model',
+                            text: this.pendingTranscript.trim(),
+                            ts: Date.now(),
+                            model: this.sessionModel,
+                            live: true
+                        });
+                    }
+                    this.pendingTranscript = '';
+
+                    // Clear streaming bubble references (renderChat will redraw properly)
+                    this.liveStreamingEl = null;
+                    this.liveUserBubble = null;
+
+                    saveConvs();
+                    renderSidebar();
+                    renderChat();
+
+                    // Resume listening after playback finishes
+                    const remaining = this.playbackCtx
+                        ? Math.max(0, this.playbackScheduledTime - this.playbackCtx.currentTime)
+                        : 0;
+                    setTimeout(() => {
+                        if (this.active) {
+                            liveSetHUD('listening', '🎙 Ouvindo…');
+                        }
+                    }, remaining * 1000 + 300);
+                },
+
+                // ─ Audio Capture: Mic → PCM 16bit 16kHz → WebSocket ─
+                async startAudioCapture() {
+                    try {
+                        const stream = await navigator.mediaDevices.getUserMedia({
+                            audio: {
+                                sampleRate: { ideal: 16000 },
+                                channelCount: 1,
+                                echoCancellation: true,
+                                noiseSuppression: true,
+                                autoGainControl: true
+                            }
+                        });
+
+                        this.mediaStream = stream;
+                        this.captureCtx = new (window.AudioContext || window.webkitAudioContext)({
+                            sampleRate: 16000
+                        });
+
+                        const source = this.captureCtx.createMediaStreamSource(stream);
+                        const processor = this.captureCtx.createScriptProcessor(4096, 1, 1);
+
+                        processor.onaudioprocess = (e) => {
+                            if (!this.active || this.ws?.readyState !== WebSocket.OPEN) return;
+
+                            const float32 = e.inputBuffer.getChannelData(0);
+                            const int16 = new Int16Array(float32.length);
+                            for (let i = 0; i < float32.length; i++) {
+                                const s = Math.max(-1, Math.min(1, float32[i]));
+                                int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                            }
+
+                            const bytes = new Uint8Array(int16.buffer);
+                            let binary = '';
+                            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+                            const base64 = btoa(binary);
+
+                            const msg = {
+                                realtimeInput: {
+                                    audio: {
+                                        mimeType: 'audio/pcm;rate=16000',
+                                        data: base64
+                                    }
+                                }
+                            };
+                            this.ws.send(JSON.stringify(msg));
+                        };
+
+                        source.connect(processor);
+                        processor.connect(this.captureCtx.destination);
+                        this.scriptNode = processor;
+                        this.sourceNode = source;
+                    } catch (e) {
+                        console.error('[GeminiLive] Audio capture error:', e);
+                        toast('⚠ Mic: ' + e.message);
+                    }
+                },
+
+                // ─ Audio Playback: PCM from Gemini → Speaker ─
+                queueAudio(base64PCM) {
+                    if (!this.playbackCtx) {
+                        this.playbackCtx = new (window.AudioContext || window.webkitAudioContext)({
+                            sampleRate: 24000
+                        });
+                        this.playbackScheduledTime = 0;
+                    }
+
+                    const binary = atob(base64PCM);
+                    const bytes = new Uint8Array(binary.length);
+                    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                    const int16 = new Int16Array(bytes.buffer);
+
+                    const float32 = new Float32Array(int16.length);
+                    for (let i = 0; i < int16.length; i++) {
+                        float32[i] = int16[i] / (int16[i] < 0 ? 0x8000 : 0x7FFF);
+                    }
+
+                    const buffer = this.playbackCtx.createBuffer(1, float32.length, 24000);
+                    buffer.getChannelData(0).set(float32);
+
+                    const src = this.playbackCtx.createBufferSource();
+                    src.buffer = buffer;
+                    src.connect(this.playbackCtx.destination);
+
+                    const now = this.playbackCtx.currentTime;
+                    const startTime = Math.max(now + 0.01, this.playbackScheduledTime);
+                    src.start(startTime);
+                    this.playbackScheduledTime = startTime + buffer.duration;
+                },
+
+                clearPlayback() {
+                    this.playbackScheduledTime = 0;
+                    if (this.playbackCtx) {
+                        this.playbackCtx.close().catch(() => {});
+                        this.playbackCtx = null;
+                    }
+                },
+
+                disconnect() {
+                    this.active = false;
+                    this.pendingTranscript = '';
+                    this.pendingUserTranscript = '';
+                    this.liveStreamingEl = null;
+                    this.liveUserBubble = null;
+
+                    if (this.scriptNode) { this.scriptNode.disconnect(); this.scriptNode = null; }
+                    if (this.sourceNode) { this.sourceNode.disconnect(); this.sourceNode = null; }
+                    if (this.captureCtx) { this.captureCtx.close().catch(() => {}); this.captureCtx = null; }
+                    if (this.mediaStream) {
+                        this.mediaStream.getTracks().forEach(t => t.stop());
+                        this.mediaStream = null;
+                    }
+                    this.clearPlayback();
+                    if (this.ws) { this.ws.close(); this.ws = null; }
+
+                    liveMode = false;
+                    liveSetHUD('idle', '');
+                    document.getElementById('live-btn')?.classList.remove('on');
+                }
+            };
 
             // ─ HUD helper ─
             function liveSetHUD(state, label) {
@@ -5700,6 +6476,39 @@ return item;`
 
             // ─ Toggle ─
             async function toggleLive() {
+                const model = document.getElementById('model-sel').value;
+
+                // ═══ Gemini Live API (native WebSocket) ═══
+                if (isLiveModel(model)) {
+                    if (geminiLive.active) {
+                        geminiLive.disconnect();
+                        toast('⏹ Gemini Live encerrado.');
+                        return;
+                    }
+
+                    const apiKey = document.getElementById('api-in').value.trim();
+                    if (!apiKey) { toast('⚠ Insira sua API Key!'); return; }
+
+                    const isSecure = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+                    if (!isSecure) { toast('⚠ Live Mode requer HTTPS.'); return; }
+
+                    if (!activeId) newConversation();
+
+                    try {
+                        liveMode = true;
+                        document.getElementById('live-btn')?.classList.add('on');
+                        await geminiLive.connect(apiKey, model);
+                        toast('✓ Gemini Live conectado!');
+                    } catch (err) {
+                        liveMode = false;
+                        document.getElementById('live-btn')?.classList.remove('on');
+                        console.error('[GeminiLive] Connect failed:', err);
+                        toast('❌ Falha ao conectar: ' + (err.message || 'erro desconhecido'));
+                    }
+                    return;
+                }
+
+                // ═══ Legacy pipeline (Web Speech API + Ghost TTS) ═══
                 if (!window.SpeechRecognition && !window.webkitSpeechRecognition) {
                     toast('⚠ Live Mode precisa de Chrome ou Edge.'); return;
                 }
@@ -5786,6 +6595,7 @@ return item;`
                     if (e.error === 'network') { toast('⚠ Erro de rede no Live Mode.'); liveStop(); return; }
                     if (e.error === 'service-not-allowed') { toast('⚠ Serviço de voz indisponível (HTTPS requerido).'); liveStop(); return; }
                     if (e.error === 'aborted') return;
+                    if (e.error === 'no-speech') return; // Silêncio — onend vai reiniciar automaticamente
                     console.warn('[Live STT] Erro:', e.error);
                     toast('⚠ Erro no Live Mode: ' + (e.error || 'desconhecido'));
                 };
@@ -5912,6 +6722,10 @@ return item;`
 
             // ─ Para tudo ─
             function liveStop() {
+                // Disconnect Gemini Live WebSocket if active
+                if (geminiLive.active) {
+                    geminiLive.disconnect();
+                }
                 liveMode = false;
                 liveIgnoreSTT = false;
                 clearTimeout(liveSilenceTimer);
@@ -5961,7 +6775,7 @@ return item;`
                     reader.onload = evt => {
                         const base64 = evt.target.result.split(',')[1];
                         if (isImage) {
-                            pendingImages.push({ mimeType: file.type, data: base64, url: evt.target.result });
+                            pendingImages.push({ name: file.name, mimeType: file.type, data: base64, url: evt.target.result });
                         } else {
                             pendingFiles.push({ mimeType: file.type, data: base64, name: file.name, url: evt.target.result });
                         }

@@ -32,6 +32,52 @@
     const SYNC_MAX_FAILURES = 10;
     let syncPaused = false;
 
+    function isQuotaExceededError(error) {
+        return error?.name === 'QuotaExceededError'
+            || error?.name === 'NS_ERROR_DOM_QUOTA_REACHED'
+            || error?.code === 22
+            || error?.code === 1014;
+    }
+
+    function compactConversationState(value, maxConversations = 15, maxMessagesPerConversation = 60) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+        const ordered = Object.entries(value)
+            .sort(([, a], [, b]) => (b?.ts || 0) - (a?.ts || 0))
+            .slice(0, maxConversations);
+        const compacted = {};
+
+        for (const [id, conversation] of ordered) {
+            const msgs = Array.isArray(conversation?.msgs) ? conversation.msgs : [];
+            compacted[id] = {
+                ...conversation,
+                msgs: msgs.slice(-maxMessagesPerConversation).map(message => {
+                    if (!message || typeof message !== 'object') return message;
+                    const nextMessage = { ...message };
+                    if (Array.isArray(message.imgs)) {
+                        nextMessage.imgs = message.imgs.filter(Boolean).map((img, index) => ({
+                            mimeType: img?.mimeType || 'image/*',
+                            name: img?.name || `imagem-${index + 1}`,
+                            path: img?.path || '',
+                            downloadUrl: img?.downloadUrl || '',
+                            omitted: true
+                        }));
+                    }
+                    if (Array.isArray(message.files)) {
+                        nextMessage.files = message.files.filter(Boolean).map(file => ({
+                            name: file?.name || 'arquivo',
+                            mimeType: file?.mimeType || file?.type || '',
+                            path: file?.path || '',
+                            downloadUrl: file?.downloadUrl || ''
+                        }));
+                    }
+                    return nextMessage;
+                })
+            };
+        }
+
+        return compacted;
+    }
+
     function clearTrackedState() {
         for (const key of STATE_KEYS) localStorage.removeItem(key);
     }
@@ -48,11 +94,22 @@
             localStorage.removeItem(key);
             return;
         }
-        if (JSON_STATE_KEYS.has(key)) {
-            localStorage.setItem(key, JSON.stringify(value));
-            return;
+        try {
+            if (JSON_STATE_KEYS.has(key)) {
+                const serializedValue = key === 'gc_convs'
+                    ? compactConversationState(value)
+                    : value;
+                localStorage.setItem(key, JSON.stringify(serializedValue));
+                return;
+            }
+            localStorage.setItem(key, String(value));
+        } catch (error) {
+            if (isQuotaExceededError(error)) {
+                console.warn('[Sync] Estado local excedeu a cota do navegador para', key);
+                return;
+            }
+            throw error;
         }
-        localStorage.setItem(key, String(value));
     }
 
     function collectState() {
