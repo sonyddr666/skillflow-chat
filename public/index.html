@@ -630,6 +630,38 @@
             border-radius: 3px;
         }
 
+        #scroll-bottom-btn {
+            position: absolute;
+            right: 22px;
+            bottom: 104px;
+            z-index: 30;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 10px 14px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: rgba(16, 18, 24, 0.92);
+            color: var(--text);
+            cursor: pointer;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+            transition: transform .15s ease, opacity .15s ease, border-color .15s ease;
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        #scroll-bottom-btn.show {
+            display: inline-flex;
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        #scroll-bottom-btn:hover {
+            transform: translateY(-1px);
+            border-color: var(--accent);
+        }
+
         .row {
             display: flex;
             gap: 10px;
@@ -2536,6 +2568,7 @@
                     </div>
                 </div>
             </div>
+            <button id="scroll-bottom-btn" onclick="scrollEnd()" title="Ir para o fim">↓ Novas mensagens</button>
 
             <!-- INPUT -->
             <div id="img-preview-container"></div>
@@ -3222,6 +3255,54 @@
                     await fetchLocalJson('/api/skills/' + encodeURIComponent(id), { method: 'DELETE' });
                     await loadPlugins();
                     return { ok: true, id };
+                },
+                attach_workspace_file_to_chat(args) {
+                    const rawPath = String(args.path || '').trim();
+                    if (!rawPath) return { error: 'path obrigatorio' };
+                    const normalizedPath = resolveChatPath('', rawPath);
+                    if (!normalizedPath) return { error: 'path invalido' };
+                    const fileName = String(args.name || messageFileName({ path: normalizedPath }) || 'arquivo').trim();
+                    const mimeType = String(args.mimeType || guessMimeTypeFromFileName(fileName)).trim() || 'application/octet-stream';
+                    const answer = String(args.message || args.answer || `Arquivo preparado: ${fileName}`).trim();
+                    return {
+                        ok: true,
+                        answer,
+                        artifacts: [{
+                            path: normalizedPath,
+                            name: fileName,
+                            mimeType
+                        }]
+                    };
+                },
+                async create_text_file_for_user(args) {
+                    const path = String(args.path || '').trim();
+                    const content = String(args.content || '');
+                    if (!path) return { error: 'path obrigatorio' };
+                    if (!content) return { error: 'content obrigatorio' };
+                    const normalizedPath = resolveChatPath('', path);
+                    if (!normalizedPath) return { error: 'path invalido' };
+                    const payload = await fetchLocalJson('/api/fs/write', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            path: normalizedPath,
+                            content,
+                            create_dirs: args.create_dirs !== false
+                        })
+                    });
+                    const fileName = String(args.name || messageFileName({ path: normalizedPath }) || 'arquivo').trim();
+                    const mimeType = String(args.mimeType || guessMimeTypeFromFileName(fileName)).trim() || 'text/plain';
+                    const answer = String(args.message || args.answer || `Arquivo criado: ${fileName}`).trim();
+                    return {
+                        ok: true,
+                        answer,
+                        write: payload,
+                        artifacts: [{
+                            path: payload.path || normalizedPath,
+                            name: fileName,
+                            mimeType
+                        }]
+                    };
                 }
             };
 
@@ -3521,6 +3602,36 @@ return item;`
                         },
                         required: ['id']
                     }
+                },
+                {
+                    id: 'wf_attach_file_chat', builtin: true, enabled: true, icon: '📎', name: 'attach_workspace_file_to_chat',
+                    description: 'Anexa um arquivo ja existente da workspace persistente do usuario na resposta do chat. Use quando precisar entregar um arquivo ao usuario na conversa.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            path: { type: 'STRING', description: 'Caminho relativo do arquivo ja existente na workspace do usuario. Ex: .uploads/2026-03/images/saida.png' },
+                            name: { type: 'STRING', description: 'Nome de exibicao opcional no chat' },
+                            mimeType: { type: 'STRING', description: 'Mime type opcional. Ex: image/png, text/plain, application/pdf' },
+                            message: { type: 'STRING', description: 'Texto curto opcional para acompanhar o arquivo' }
+                        },
+                        required: ['path']
+                    }
+                },
+                {
+                    id: 'wf_create_text_file', builtin: true, enabled: true, icon: '📄', name: 'create_text_file_for_user',
+                    description: 'Cria um arquivo de texto, markdown, json ou csv na workspace persistente do usuario e devolve esse arquivo como anexo na conversa.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            path: { type: 'STRING', description: 'Caminho relativo do arquivo a criar. Ex: .outputs/relatorios/resumo.md' },
+                            content: { type: 'STRING', description: 'Conteudo completo do arquivo' },
+                            name: { type: 'STRING', description: 'Nome de exibicao opcional no chat' },
+                            mimeType: { type: 'STRING', description: 'Mime type opcional. Ex: text/plain, text/markdown, application/json' },
+                            create_dirs: { type: 'BOOLEAN', description: 'Cria pastas pai automaticamente' },
+                            message: { type: 'STRING', description: 'Texto curto opcional para acompanhar o arquivo' }
+                        },
+                        required: ['path', 'content']
+                    }
                 }
             ];
 
@@ -3782,6 +3893,35 @@ return item;`
                     out.push(part);
                 });
                 return out.join('/');
+            }
+
+            function messageFileName(file) {
+                const raw = String(file?.name || file?.path || file?.downloadUrl || 'arquivo').trim();
+                const pathish = raw.split('?')[0];
+                const parts = pathish.split('/').filter(Boolean);
+                return parts.at(-1) || raw || 'arquivo';
+            }
+
+            function guessMimeTypeFromFileName(name) {
+                const lower = String(name || '').toLowerCase();
+                if (lower.endsWith('.png')) return 'image/png';
+                if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+                if (lower.endsWith('.webp')) return 'image/webp';
+                if (lower.endsWith('.gif')) return 'image/gif';
+                if (lower.endsWith('.svg')) return 'image/svg+xml';
+                if (lower.endsWith('.pdf')) return 'application/pdf';
+                if (lower.endsWith('.json')) return 'application/json';
+                if (lower.endsWith('.csv')) return 'text/csv';
+                if (lower.endsWith('.md')) return 'text/markdown';
+                if (lower.endsWith('.html')) return 'text/html';
+                if (lower.endsWith('.txt') || lower.endsWith('.log')) return 'text/plain';
+                if (lower.endsWith('.js')) return 'text/javascript';
+                if (lower.endsWith('.ts')) return 'text/typescript';
+                if (lower.endsWith('.py')) return 'text/x-python';
+                if (lower.endsWith('.css')) return 'text/css';
+                if (lower.endsWith('.xml')) return 'application/xml';
+                if (lower.endsWith('.zip')) return 'application/zip';
+                return 'application/octet-stream';
             }
 
             function fileIconForMessage(file) {
@@ -4963,6 +5103,7 @@ return item;`
                 chatRenderedCount = slice.length;
 
                 scrollEnd();
+                updateScrollBottomButton();
                 requestAnimationFrame(() => renderMermaidBlocks());
 
                 // Setup IntersectionObserver for auto-loading older messages
@@ -5003,6 +5144,7 @@ return item;`
                 requestAnimationFrame(() => {
                     const newScrollHeight = c.scrollHeight;
                     c.scrollTop += (newScrollHeight - prevScrollHeight);
+                    updateScrollBottomButton();
                     renderMermaidBlocks();
                 });
 
@@ -5285,9 +5427,19 @@ return item;`
             function esc(s) {
                 return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
             }
+            function updateScrollBottomButton() {
+                const c = document.getElementById('chat');
+                const btn = document.getElementById('scroll-bottom-btn');
+                if (!c || !btn) return;
+                const distance = c.scrollHeight - c.scrollTop - c.clientHeight;
+                btn.classList.toggle('show', distance > 220);
+            }
             function scrollEnd() {
                 requestAnimationFrame(() => {
-                    const c = document.getElementById('chat'); c.scrollTop = c.scrollHeight;
+                    const c = document.getElementById('chat');
+                    if (!c) return;
+                    c.scrollTop = c.scrollHeight;
+                    updateScrollBottomButton();
                 });
             }
             function toast(msg) {
@@ -5722,6 +5874,14 @@ return item;`
                                 : `<p style="color:var(--muted);font-style:italic">O modelo executou ferramentas mas não gerou texto de resposta.</p>`;
                         }
                     }
+                    const deliveredFiles = Array.isArray(modelFiles) ? modelFiles.length : 0;
+                    if (!full && deliveredFiles) {
+                        convs[activeId].msgs[mi].text = `[Arquivo${deliveredFiles > 1 ? 's' : ''} entregue${deliveredFiles > 1 ? 's' : ''} — veja ${deliveredFiles > 1 ? 'os anexos abaixo' : 'o anexo abaixo'}.]`;
+                        const artifactBubble = document.getElementById(`bb${mi}`);
+                        if (artifactBubble) {
+                            artifactBubble.innerHTML = `<p style="color:var(--muted);font-style:italic">${deliveredFiles > 1 ? `${deliveredFiles} arquivos foram gerados` : 'Arquivo gerado'} e anexado${deliveredFiles > 1 ? 's' : ''} na conversa.</p>`;
+                        }
+                    }
                     if (tok) convs[activeId].msgs[mi].tok = tok;
                     if (sig) convs[activeId].msgs[mi].sig = sig;
                     if (Array.isArray(modelFiles) && modelFiles.length) convs[activeId].msgs[mi].files = modelFiles;
@@ -5781,6 +5941,12 @@ return item;`
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
             });
             document.getElementById('msg').addEventListener('input', function () { autoH(this); });
+            window.addEventListener('DOMContentLoaded', () => {
+                const chat = document.getElementById('chat');
+                if (!chat) return;
+                chat.addEventListener('scroll', updateScrollBottomButton, { passive: true });
+                updateScrollBottomButton();
+            });
 
             // ─ PASTE IMAGE (Ctrl+V) ─
             document.addEventListener('paste', e => {
