@@ -2325,6 +2325,110 @@
             border-radius: 2px;
             padding: 0 1px;
         }
+        .msg-trace {
+            margin-top: 12px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: rgba(255, 255, 255, .02);
+            overflow: hidden;
+        }
+
+        .msg-trace summary {
+            list-style: none;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 10px 12px;
+            color: var(--muted);
+            font-size: 12px;
+            font-weight: 600;
+            user-select: none;
+        }
+
+        .msg-trace summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .msg-trace summary:hover {
+            background: rgba(255, 255, 255, .03);
+            color: var(--text);
+        }
+
+        .msg-trace-title {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .msg-trace-title::before {
+            content: '>';
+            color: var(--accent2);
+            font-size: 11px;
+            transition: transform .18s ease;
+        }
+
+        .msg-trace[open] .msg-trace-title::before {
+            transform: rotate(90deg);
+        }
+
+        .msg-trace-count {
+            color: var(--accent2);
+            font-weight: 700;
+        }
+
+        .msg-trace-steps {
+            border-top: 1px solid var(--border);
+            padding: 8px 10px 10px;
+            display: grid;
+            gap: 8px;
+        }
+
+        .trace-step {
+            border: 1px solid rgba(255, 255, 255, .06);
+            background: rgba(255, 255, 255, .02);
+            border-radius: 10px;
+            padding: 9px 10px;
+        }
+
+        .trace-step-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 4px;
+        }
+
+        .trace-step-title {
+            color: var(--text);
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .trace-step-type {
+            color: var(--accent2);
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: .04em;
+        }
+
+        .trace-step-meta {
+            color: var(--muted);
+            font-size: 11px;
+            line-height: 1.45;
+        }
+
+        .trace-step-body {
+            margin-top: 6px;
+            color: var(--text);
+            font-size: 12px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
     </style>
 </head>
 
@@ -4025,6 +4129,137 @@ return item;`
                 return normalizeMessageFiles(artifacts, resolvedBasePath);
             }
 
+            function trimTraceText(value, maxLen = 420) {
+                const text = String(value ?? '')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                if (!text) return '';
+                return text.length > maxLen ? text.slice(0, Math.max(0, maxLen - 1)) + '…' : text;
+            }
+
+            function summarizeTraceValue(value, maxLen = 420) {
+                if (value === null || value === undefined || value === '') return '';
+                if (typeof value === 'string') return trimTraceText(value, maxLen);
+                if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+                try {
+                    return trimTraceText(JSON.stringify(value, null, 2), maxLen);
+                } catch (_) {
+                    return trimTraceText(String(value), maxLen);
+                }
+            }
+
+            function summarizeTraceArgs(args) {
+                if (!args || typeof args !== 'object' || Array.isArray(args)) return '';
+                const entries = Object.entries(args)
+                    .slice(0, 8)
+                    .map(([key, value]) => `${key}=${summarizeTraceValue(value, 90)}`);
+                return trimTraceText(entries.join(', '), 320);
+            }
+
+            function summarizeToolResult(result) {
+                const files = extractToolArtifacts(result);
+                const parts = [];
+                const primary = trimTraceText(
+                    result?.answer
+                    || result?.message
+                    || result?.summary
+                    || result?.note
+                    || result?.error
+                    || '',
+                    260
+                );
+                if (primary) parts.push(primary);
+                if (typeof result?.ok === 'boolean') parts.push(result.ok ? 'ok=true' : 'ok=false');
+                if (typeof result?.status === 'number') parts.push(`status=${result.status}`);
+                if (files.length) parts.push(`artifacts=${files.length}`);
+                if (!parts.length) {
+                    const fallback = summarizeTraceValue(result, 260);
+                    if (fallback) parts.push(fallback);
+                }
+                return trimTraceText(parts.join(' | '), 320);
+            }
+
+            function createTraceStep(type, options = {}) {
+                return {
+                    type: String(type || 'event'),
+                    title: trimTraceText(options.title || options.label || type || 'evento', 120),
+                    meta: trimTraceText(options.meta || '', 240),
+                    body: summarizeTraceValue(options.body || '', 700),
+                    ts: options.ts || Date.now()
+                };
+            }
+
+            function ensureMessageTrace(message) {
+                if (!message || typeof message !== 'object') return [];
+                if (!Array.isArray(message.trace)) message.trace = [];
+                return message.trace;
+            }
+
+            function pushMessageTrace(message, step) {
+                const trace = ensureMessageTrace(message);
+                if (!step || typeof step !== 'object') return trace;
+                trace.push(step);
+                if (trace.length > 30) trace.splice(0, trace.length - 30);
+                return trace;
+            }
+
+            function pushToolCallTrace(message, call) {
+                pushMessageTrace(message, createTraceStep('tool_call', {
+                    title: call?.name || 'tool',
+                    meta: summarizeTraceArgs(call?.arguments || call?.args || {}),
+                    body: call?.arguments_raw
+                        ? trimTraceText(call.arguments_raw, 500)
+                        : ''
+                }));
+            }
+
+            function pushToolResultTrace(message, callName, result) {
+                const files = extractToolArtifacts(result);
+                const resultSummary = summarizeToolResult(result);
+                const extra = [];
+                if (files.length) extra.push(`${files.length} artifact${files.length > 1 ? 's' : ''}`);
+                pushMessageTrace(message, createTraceStep('tool_result', {
+                    title: callName || 'tool_result',
+                    meta: extra.join(' • '),
+                    body: resultSummary
+                }));
+            }
+
+            function buildTraceSummary(trace) {
+                const steps = Array.isArray(trace) ? trace : [];
+                const toolCalls = steps.filter(step => step?.type === 'tool_call').length;
+                const label = steps.some(step => step?.type === 'thinking') ? 'thinking' : 'trace';
+                const extra = [];
+                if (toolCalls) extra.push(`${toolCalls} skill${toolCalls > 1 ? 's' : ''}`);
+                extra.push(`${steps.length} passo${steps.length > 1 ? 's' : ''}`);
+                return {
+                    label,
+                    meta: extra.join(' • ')
+                };
+            }
+
+            function renderMessageTrace(trace) {
+                const steps = Array.isArray(trace) ? trace.filter(Boolean) : [];
+                if (!steps.length) return '';
+                const summary = buildTraceSummary(steps);
+                return `<details class="msg-trace">
+  <summary>
+    <span class="msg-trace-title">${esc(summary.label)}</span>
+    <span class="msg-trace-count">${esc(summary.meta)}</span>
+  </summary>
+  <div class="msg-trace-steps">
+    ${steps.map(step => `<div class="trace-step trace-step-${esc(step.type || 'event')}">
+      <div class="trace-step-head">
+        <span class="trace-step-title">${esc(step.title || step.type || 'evento')}</span>
+        <span class="trace-step-type">${esc(step.type || 'event')}</span>
+      </div>
+      ${step.meta ? `<div class="trace-step-meta">${esc(step.meta)}</div>` : ''}
+      ${step.body ? `<div class="trace-step-body">${esc(step.body)}</div>` : ''}
+    </div>`).join('')}
+  </div>
+</details>`;
+            }
+
             function pruneEmptyFields(value) {
                 if (Array.isArray(value)) {
                     return value
@@ -5071,7 +5306,7 @@ return item;`
             const msgHTMLCache = new Map(); // key: convId+msgIndex+msgTs → HTML string
 
             function msgCacheKey(convId, idx, msg) {
-                return `${convId}:${idx}:${msg.ts || 0}:${(msg.text || '').length}`;
+                return `${convId}:${idx}:${msg.ts || 0}:${(msg.text || '').length}:${Array.isArray(msg.trace) ? msg.trace.length : 0}:${Array.isArray(msg.files) ? msg.files.length : 0}`;
             }
 
             function cachedMsgHTML(convId, msg, idx) {
@@ -5344,7 +5579,7 @@ return item;`
                 const allFiles = Array.isArray(m.files) ? m.files : [];
                 const imageFiles = allFiles.filter(isRenderableImageFile);
                 const regularFiles = allFiles.filter(file => !isRenderableImageFile(file));
-                if (Array.isArray(m.files)) m.files = regularFiles;
+                const traceHtml = m.role === 'model' ? renderMessageTrace(m.trace) : '';
 
                 if (m.imgs && m.imgs.length > 0) {
                     body += `<div class="attached-imgs">${m.imgs.map(img => {
@@ -5362,12 +5597,13 @@ return item;`
                 if (false) {
                     body += `<div class="attached-imgs">${m.files.map(f => `<div class="file-preview"><span class="file-icon">${f.type === 'application/pdf' ? '📄' : '📝'}</span><span>${esc(f.name)}</span></div>`).join('')}</div>`;
                 }
-                if (m.files && m.files.length > 0) {
-                    body += `<div class="attached-imgs">${m.files.map(f => renderMessageFile(f, m.role)).join('')}</div>`;
+                if (regularFiles.length > 0) {
+                    body += `<div class="attached-imgs">${regularFiles.map(f => renderMessageFile(f, m.role)).join('')}</div>`;
                 }
 
                 if (m.role === 'model') {
                     body += renderMarkdown(m.text || '');
+                    body += traceHtml;
                 } else {
                     body += `<p>${esc(m.text || '').replace(/\n/g, '<br>')}</p>`;
                 }
@@ -5759,6 +5995,12 @@ return item;`
                         // ─ FUNCTION CALL(S): execute and re-request ─
                         // Supports: parallel FCs, sequential multi-step, single FC — all Gemini 3 compliant
                         if (fnCallParts.length && depth < 6) {
+                            fnCallParts.forEach(part => {
+                                pushToolCallTrace(currentModelMsg, {
+                                    name: part?.functionCall?.name,
+                                    arguments: part?.functionCall?.args || {}
+                                });
+                            });
                             // Build visual indicator for all function calls
                             const callLabels = fnCallParts.map(p => {
                                 const args = p.functionCall.args || {};
@@ -5775,6 +6017,9 @@ return item;`
                             const results = await Promise.all(
                                 fnCallParts.map(p => executePlugin(p.functionCall.name, p.functionCall.args || {}))
                             );
+                            results.forEach((result, index) => {
+                                pushToolResultTrace(currentModelMsg, fnCallParts[index]?.functionCall?.name, result);
+                            });
                             const currentFiles = results.flatMap(result => extractToolArtifacts(result));
 
                             // Model parts: send EXACTLY as received from API (thoughtSignature preserved per part)
@@ -5805,8 +6050,12 @@ return item;`
                     mi = convs[activeId].msgs.length;
                     convs[activeId].msgs.push({
                         role: 'model', text: '', ts: Date.now(), model,
-                        think: isThinking ? effectiveThink : undefined
+                        think: isThinking ? effectiveThink : undefined,
+                        trace: isThinking
+                            ? [createTraceStep('thinking', { title: 'Thinking', meta: `level=${effectiveThink}` })]
+                            : []
                     });
+                    const currentModelMsg = convs[activeId].msgs[mi];
 
                     chat.insertAdjacentHTML('beforeend', `
       <div id="mm${mi}" class="row model">
@@ -5845,6 +6094,7 @@ return item;`
 
                         if (toolCalls.length) {
                             if (depth >= 6) throw new Error('Limite de function calls atingido para o Codex.');
+                            toolCalls.forEach(call => pushToolCallTrace(currentModelMsg, call));
 
                             const callLabels = toolCalls.map(call => {
                                 const args = call.arguments || {};
@@ -5861,6 +6111,9 @@ return item;`
                             const results = await Promise.all(
                                 toolCalls.map(call => executePlugin(call.name, call.arguments || {}))
                             );
+                            results.forEach((result, index) => {
+                                pushToolResultTrace(currentModelMsg, toolCalls[index]?.name, result);
+                            });
                             const currentFiles = results.flatMap(result => extractToolArtifacts(result));
                             const assistantToolItems = outputItems.length
                                 ? outputItems
@@ -5932,6 +6185,18 @@ return item;`
                     if (tok) convs[activeId].msgs[mi].tok = tok;
                     if (sig) convs[activeId].msgs[mi].sig = sig;
                     if (Array.isArray(modelFiles) && modelFiles.length) convs[activeId].msgs[mi].files = modelFiles;
+                    pushMessageTrace(currentModelMsg, createTraceStep('final', {
+                        title: 'Resposta final',
+                        meta: [
+                            tok ? `${tok.toLocaleString()} tok` : '',
+                            deliveredFiles ? `${deliveredFiles} arquivo${deliveredFiles > 1 ? 's' : ''}` : ''
+                        ].filter(Boolean).join(' • '),
+                        body: full
+                            ? trimTraceText(full, 420)
+                            : (deliveredFiles
+                                ? `Resposta sem texto, mas com ${deliveredFiles} arquivo${deliveredFiles > 1 ? 's' : ''} entregue${deliveredFiles > 1 ? 's' : ''}.`
+                                : 'Resposta sem texto visivel.')
+                    }));
 
                     const mt = document.getElementById(`mt${mi}`);
                     if (mt) {
@@ -6877,6 +7142,7 @@ return item;`
                 screenShareCanvas: null,
                 screenShareInterval: null,
                 screenShareActive: false,
+                pendingTrace: [],
                 turnId: 0,
 
                 async connect(apiKey, model) {
@@ -6998,11 +7264,12 @@ return item;`
                         if (sc.interrupted) {
                             this.clearPlayback();
                             // Save partial transcripts before resetting
-                            if ((this.pendingUserTranscript.trim() || this.pendingTranscript.trim()) && activeId) {
+                            if ((this.pendingUserTranscript.trim() || this.pendingTranscript.trim() || this.pendingTrace.length) && activeId) {
                                 this.onTurnComplete();
                             }
                             this.pendingTranscript = '';
                             this.pendingUserTranscript = '';
+                            this.pendingTrace = [];
                             this.liveStreamingEl = null;
                             this.liveUserBubble = null;
                             this.clearInputPreview();
@@ -7098,12 +7365,27 @@ return item;`
                     const names = fcs.map(fc => fc.name).join(', ');
                     liveSetHUD('processing', `⚙ ${names}`);
 
+                    fcs.forEach(fc => {
+                        this.pendingTrace.push(createTraceStep('tool_call', {
+                            title: fc.name || 'tool',
+                            meta: summarizeTraceArgs(fc.args || {})
+                        }));
+                    });
+
                     const results = await Promise.all(
                         fcs.map(fc => executePlugin(fc.name, fc.args || {}))
                     );
+                    results.forEach((result, index) => {
+                        const files = extractToolArtifacts(result);
+                        this.pendingTrace.push(createTraceStep('tool_result', {
+                            title: fcs[index]?.name || 'tool_result',
+                            meta: files.length ? `${files.length} artifact${files.length > 1 ? 's' : ''}` : '',
+                            body: summarizeToolResult(result)
+                        }));
+                    });
 
                     // Log tool calls to chat
-                    if (activeId) {
+                    if (false && activeId) {
                         const toolText = fcs.map((fc, i) => {
                             const argStr = Object.entries(fc.args || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ');
                             const resultStr = JSON.stringify(results[i]).slice(0, 500);
@@ -7310,16 +7592,24 @@ return item;`
                     this.pendingUserTranscript = '';
 
                     // Save model speech transcript (what the model said)
-                    if (this.pendingTranscript.trim()) {
+                    if (this.pendingTranscript.trim() || this.pendingTrace.length) {
+                        const modelTrace = this.pendingTrace.slice(0, 30);
+                        modelTrace.push(createTraceStep('final', {
+                            title: 'Resposta final',
+                            meta: 'live',
+                            body: this.pendingTranscript.trim() || 'Turno sem texto final visivel.'
+                        }));
                         convs[activeId].msgs.push({
                             role: 'model',
-                            text: this.pendingTranscript.trim(),
+                            text: this.pendingTranscript.trim() || '[Trace do live disponivel abaixo.]',
                             ts: Date.now(),
                             model: this.sessionModel,
-                            live: true
+                            live: true,
+                            trace: modelTrace
                         });
                     }
                     this.pendingTranscript = '';
+                    this.pendingTrace = [];
                     this.previewText = '';
 
                     // Clear streaming bubble references (renderChat will redraw properly)
@@ -7569,7 +7859,7 @@ return item;`
                 },
 
                 disconnect() {
-                    if ((this.pendingUserTranscript.trim() || this.pendingTranscript.trim()) && activeId) {
+                    if ((this.pendingUserTranscript.trim() || this.pendingTranscript.trim() || this.pendingTrace.length) && activeId) {
                         this.onTurnComplete();
                     }
                     this.stopPreviewTranscription();
@@ -7577,6 +7867,7 @@ return item;`
                     this.active = false;
                     this.pendingTranscript = '';
                     this.pendingUserTranscript = '';
+                    this.pendingTrace = [];
                     this.liveStreamingEl = null;
                     this.liveUserBubble = null;
 

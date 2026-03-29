@@ -1,0 +1,5669 @@
+
+            // Configure Marked.js for better Markdown parsing
+            marked.setOptions({
+                breaks: true,
+                gfm: true,
+                highlight: function (code, lang) {
+                    const language = hljs.getLanguage(lang) ? lang : 'plaintext';
+                    return hljs.highlight(code, { language }).value;
+                }
+            });
+
+            // ─ RENDER MARKDOWN (safe: extracts mermaid BEFORE DOMPurify) ─
+            function renderMarkdown(rawText) {
+                if (!rawText) return '';
+                try {
+                    // Split text preserving mermaid code blocks as separate segments
+                    const MERMAID_RE = /(```mermaid[\s\S]*?```)/g;
+                    const parts = rawText.split(MERMAID_RE);
+                    let html = '';
+
+                    parts.forEach(part => {
+                        const mmdMatch = part.match(/^```mermaid\n?([\s\S]*?)```$/);
+                        if (mmdMatch) {
+                            // ── Mermaid block: completely bypass DOMPurify ──
+                            const uid = 'mmd-' + Math.random().toString(36).substr(2, 9);
+                            const encoded = encodeURIComponent(mmdMatch[1].trim());
+                            html += `<div class="mermaid-container">
+          <div class="mermaid-header">
+            <span>📊 Diagrama Mermaid</span>
+            <button class="dl-svg-btn" data-mmd-id="${uid}">⭳ Download SVG</button>
+          </div>
+          <div class="mermaid-body">
+            <div class="mermaid" id="${uid}" data-src="${encoded}"></div>
+          </div>
+        </div>`;
+                        } else if (part.trim()) {
+                            // ── Normal markdown: parse + sanitize safely ──
+                            let chunk = DOMPurify.sanitize(marked.parse(part));
+                            // Style code blocks with copy button
+                            chunk = chunk
+                                .replace(/<pre><code class="language-([^"]+)">([\s\S]*?)<\/code><\/pre>/g, (_, lang, c) => {
+                                    const id = 'code-' + Math.random().toString(36).substr(2, 9);
+                                    return `<div class="code-container"><div class="code-header"><span>${lang}</span><button class="copy-code-btn" data-code-id="${id}">Copiar</button></div><pre><code id="${id}" class="hljs language-${lang}">${c}</code></pre></div>`;
+                                })
+                                .replace(/<pre><code>([\s\S]*?)<\/code><\/pre>/g, (_, c) => {
+                                    const id = 'code-' + Math.random().toString(36).substr(2, 9);
+                                    return `<div class="code-container"><div class="code-header"><span>CODE</span><button class="copy-code-btn" data-code-id="${id}">Copiar</button></div><pre><code id="${id}" class="hljs">${c}</code></pre></div>`;
+                                });
+                            html += chunk;
+                        }
+                    });
+
+                    return html || `<p>${esc(rawText)}</p>`;
+                } catch (err) {
+                    console.error('renderMarkdown error:', err);
+                    return `<pre>${esc(rawText)}</pre>`;
+                }
+            }
+
+
+            // Mermaid init with theme support
+            function initMermaid() {
+                const theme = document.documentElement.getAttribute('data-theme');
+                mermaid.initialize({
+                    startOnLoad: false,
+                    theme: theme === 'dark' ? 'dark' : 'default',
+                    securityLevel: 'loose',
+                    fontFamily: 'Segoe UI, system-ui, sans-serif'
+                });
+            }
+
+            async function renderMermaidBlocks() {
+                const blocks = document.querySelectorAll('.mermaid[data-src]:not([data-rendered="1"])');
+                if (!blocks.length) return;
+
+                for (const block of blocks) {
+                    // Inject decoded mermaid source as textContent (not innerHTML — no XSS risk)
+                    block.textContent = decodeURIComponent(block.getAttribute('data-src'));
+                    block.setAttribute('data-rendered', '1');
+                    try {
+                        await mermaid.run({ nodes: [block] });
+                    } catch (e) {
+                        const container = block.closest('.mermaid-container');
+                        if (container) {
+                            container.innerHTML = `<div class="mermaid-error">⚠ Erro no diagrama: ${e.message}<br><small>Código: ${esc(decodeURIComponent(block.getAttribute('data-src') || ''))}</small></div>`;
+                        }
+                    }
+                }
+            }
+
+            // ─ EVENT DELEGATION for dynamic buttons ─
+            document.getElementById('chat').addEventListener('click', e => {
+                // Copy code button
+                const copyBtn = e.target.closest('.copy-code-btn');
+                if (copyBtn) {
+                    const id = copyBtn.getAttribute('data-code-id');
+                    const el = document.getElementById(id);
+                    if (el) navigator.clipboard.writeText(el.innerText).then(() => toast('✓ Código copiado!'));
+                    return;
+                }
+                // Download SVG button
+                const dlBtn = e.target.closest('.dl-svg-btn');
+                if (dlBtn) {
+                    const id = dlBtn.getAttribute('data-mmd-id');
+                    const el = document.getElementById(id);
+                    if (!el) return;
+                    const svg = el.querySelector('svg') || el;
+                    const blob = new Blob([svg.outerHTML], { type: 'image/svg+xml' });
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(blob);
+                    a.download = 'diagrama_' + id + '.svg';
+                    document.body.appendChild(a); a.click(); a.remove();
+                    toast('✓ SVG baixado!');
+                }
+            });
+
+            const G3 = ['gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview', 'gemini-3.1-flash-live-preview'];
+
+            function isLiveModel(model) {
+                return String(model || '').includes('-live-');
+            }
+
+            function saveLiveVoiceCfg() {
+                const voice = document.getElementById('live-voice-sel')?.value || 'Puck';
+                setStorageItem('gc_live_voice', voice, { silent: true });
+            }
+
+            function loadLiveVoiceCfg() {
+                const voice = localStorage.getItem('gc_live_voice') || 'Puck';
+                const sel = document.getElementById('live-voice-sel');
+                if (sel) sel.value = voice;
+            }
+
+            const CODEX_MODELS = [
+                { value: 'gpt-5.4', label: 'GPT-5.4' },
+                { value: 'gpt-5.4-mini', label: 'GPT-5.4-Mini' },
+                { value: 'gpt-5.3-codex', label: 'GPT-5.3-Codex' },
+                { value: 'gpt-5.2-codex', label: 'GPT-5.2-Codex' },
+                { value: 'gpt-5.2', label: 'GPT-5.2' },
+                { value: 'gpt-5.1-codex-max', label: 'GPT-5.1-Codex-Max' },
+                { value: 'gpt-5.1-codex-mini', label: 'GPT-5.1-Codex-Mini' }
+            ];
+            const CODEX_DEFAULT_REASONING = 'medium';
+            const CODEX_DEFAULT_HISTORY_LIMIT = 40;
+            const GEMINI_THINKING_OPTIONS = [
+                { value: '', label: 'auto (padrao)' },
+                { value: 'minimal', label: 'minimal' },
+                { value: 'low', label: 'low' },
+                { value: 'medium', label: 'medium' },
+                { value: 'high', label: 'high' }
+            ];
+            const CODEX_THINKING_OPTIONS = [
+                { value: '', label: 'auto (padrao)' },
+                { value: 'low', label: 'low (baixa)' },
+                { value: 'medium', label: 'medium (media)' },
+                { value: 'high', label: 'high (alta)' },
+                { value: 'xhigh', label: 'xhigh (altissimo)' }
+            ];
+            const CODEX_REASONING_MAP = {
+                '': '',
+                auto: '',
+                default: '',
+                minimal: 'low',
+                low: 'low',
+                baixa: 'low',
+                medium: 'medium',
+                media: 'medium',
+                'média': 'medium',
+                high: 'high',
+                alta: 'high',
+                xhigh: 'xhigh',
+                altissimo: 'xhigh',
+                'altíssimo': 'xhigh'
+            };
+            const supportsThinking = m => G3.some(x => String(m || '').startsWith(x.replace('-preview', ''))) || String(m || '').includes('2.5');
+
+            function isCodexModel(model) {
+                return CODEX_MODELS.some(item => item.value === String(model || ''));
+            }
+
+            function normalizeCodexReasoning(value, preserveAuto = false) {
+                const raw = String(value || '').trim().toLowerCase();
+                const normalized = Object.prototype.hasOwnProperty.call(CODEX_REASONING_MAP, raw)
+                    ? CODEX_REASONING_MAP[raw]
+                    : CODEX_DEFAULT_REASONING;
+                if (!normalized) return preserveAuto ? '' : CODEX_DEFAULT_REASONING;
+                return normalized;
+            }
+
+            function syncThinkLevelOptions() {
+                const select = document.getElementById('think-lvl');
+                const model = document.getElementById('model-sel')?.value || '';
+                if (!select) return;
+
+                const current = select.value;
+                const usingCodex = isCodexModel(model);
+                const options = usingCodex ? CODEX_THINKING_OPTIONS : GEMINI_THINKING_OPTIONS;
+                const nextValue = usingCodex
+                    ? normalizeCodexReasoning(current, true)
+                    : current;
+
+                select.innerHTML = options
+                    .map(opt => `<option value="${opt.value}">${opt.label}</option>`)
+                    .join('');
+
+                select.value = options.some(opt => opt.value === nextValue) ? nextValue : '';
+            }
+
+            function readCfg() {
+                try {
+                    return JSON.parse(localStorage.getItem('gc_cfg') || '{}');
+                } catch (_) {
+                    return {};
+                }
+            }
+
+            function isQuotaExceededError(error) {
+                return error?.name === 'QuotaExceededError'
+                    || error?.name === 'NS_ERROR_DOM_QUOTA_REACHED'
+                    || error?.code === 22
+                    || error?.code === 1014;
+            }
+
+            function setStorageItem(key, value, options = {}) {
+                try {
+                    localStorage.setItem(key, value);
+                    return true;
+                } catch (error) {
+                    if (!isQuotaExceededError(error)) {
+                        console.warn(`[Storage] Falha ao salvar ${key}:`, error);
+                        return false;
+                    }
+                    if (typeof options.onQuota === 'function') {
+                        return options.onQuota(error) === true;
+                    }
+                    if (!options.silent) toast('⚠ Armazenamento local cheio.');
+                    return false;
+                }
+            }
+
+            function writeCfg(cfg) {
+                setStorageItem('gc_cfg', JSON.stringify(cfg), { silent: true });
+            }
+
+            function ensureCodexModels() {
+                const sel = document.getElementById('model-sel');
+                if (!sel) return;
+                if (CODEX_MODELS.some(item => [...sel.options].some(opt => opt.value === item.value))) return;
+                const group = document.createElement('optgroup');
+                group.label = 'Codex / GPT-5';
+                CODEX_MODELS.forEach(item => {
+                    const option = document.createElement('option');
+                    option.value = item.value;
+                    option.textContent = item.label;
+                    group.appendChild(option);
+                });
+                sel.appendChild(group);
+            }
+
+            function syncProviderInput() {
+                const input = document.getElementById('api-in');
+                if (!input) return;
+                const cfg = readCfg();
+                if (isCodexModel(document.getElementById('model-sel').value)) {
+                    input.type = 'text';
+                    input.value = cfg.codexAuthRaw || '';
+                    input.placeholder = 'Cole access token ou JSON auth do Codex…';
+                    input.title = 'Cole aqui o access token ou o JSON de auth do Codex.';
+                    return;
+                }
+                input.type = 'password';
+                input.value = cfg.key || '';
+                input.placeholder = 'AIzaSy…';
+                input.title = 'Cole aqui a API Key do Gemini.';
+            }
+
+            function getCodexAuthPayload() {
+                const cfg = readCfg();
+                const rawInput = document.getElementById('api-in').value.trim();
+                const rawStored = String(cfg.codexAuthRaw || '').trim();
+
+                if (rawInput) {
+                    if (cfg.codexAuth && rawInput === rawStored) return cfg.codexAuth;
+                    if (rawInput.startsWith('{')) {
+                        try {
+                            return JSON.parse(rawInput);
+                        } catch (_) {
+                            throw new Error('JSON de auth do Codex inválido.');
+                        }
+                    }
+                    return rawInput;
+                }
+
+                if (cfg.codexAuth) return cfg.codexAuth;
+                if (!rawStored) return null;
+                if (rawStored.startsWith('{')) {
+                    try {
+                        return JSON.parse(rawStored);
+                    } catch (_) {
+                        throw new Error('JSON salvo de auth do Codex inválido.');
+                    }
+                }
+                return rawStored;
+            }
+
+            function persistCodexAuth(auth) {
+                if (!auth || typeof auth !== 'object') return;
+                const cfg = readCfg();
+                cfg.codexAuth = auth;
+                if (!cfg.codexAuthRaw) cfg.codexAuthRaw = JSON.stringify(auth);
+                writeCfg(cfg);
+            }
+
+            function assetDataUrl(asset) {
+                if (!asset?.mimeType || !asset?.data) return null;
+                return `data:${asset.mimeType};base64,${asset.data}`;
+            }
+
+            function decodeAttachedText(file) {
+                const mimeType = String(file?.mimeType || '').toLowerCase();
+                const isTextLike = mimeType.startsWith('text/')
+                    || mimeType === 'application/json'
+                    || mimeType === 'application/xml'
+                    || mimeType.endsWith('+json')
+                    || mimeType.endsWith('+xml');
+
+                if (!isTextLike || !file?.data) return null;
+
+                try {
+                    const binary = atob(file.data);
+                    const bytes = Uint8Array.from(binary, ch => ch.charCodeAt(0));
+                    return new TextDecoder().decode(bytes);
+                } catch (_) {
+                    return null;
+                }
+            }
+
+            function buildCodexFileSummary(file) {
+                const name = file?.name || 'arquivo';
+                const mimeType = file?.mimeType || 'application/octet-stream';
+                const path = file?.path ? `\npath: ${file.path}` : '';
+                const decoded = decodeAttachedText(file);
+
+                if (decoded) {
+                    const trimmed = decoded.trim();
+                    const limit = 12000;
+                    return `[Arquivo anexo: ${name} (${mimeType})]${path}\n${trimmed.slice(0, limit)}${trimmed.length > limit ? '\n\n[arquivo truncado]' : ''}`;
+                }
+
+                return `[Arquivo anexo: ${name} (${mimeType})]${path}`;
+            }
+
+            function buildAttachmentReferenceText(images, files) {
+                const refs = [];
+                (Array.isArray(images) ? images : []).forEach(img => {
+                    const name = img?.name || 'imagem';
+                    const mimeType = img?.mimeType || 'image/*';
+                    const path = img?.path || '';
+                    refs.push(`[Imagem na workspace: ${name} (${mimeType})${path ? ` path=${path}` : ''}]`);
+                });
+                (Array.isArray(files) ? files : []).forEach(file => {
+                    const name = file?.name || 'arquivo';
+                    const mimeType = file?.mimeType || file?.type || 'application/octet-stream';
+                    const path = file?.path || '';
+                    refs.push(`[Arquivo na workspace: ${name} (${mimeType})${path ? ` path=${path}` : ''}]`);
+                });
+                return refs.join('\n');
+            }
+
+            function buildCodexInputFromMessages(messages) {
+                const sourceAll = Array.isArray(messages) ? messages : [];
+                const source = sourceAll.length > CODEX_DEFAULT_HISTORY_LIMIT
+                    ? sourceAll.slice(-CODEX_DEFAULT_HISTORY_LIMIT)
+                    : sourceAll;
+                const recentAttachmentIndices = new Set(
+                    source
+                        .reduce((acc, message, index) => {
+                            if ((message?.imgs?.length || 0) || (message?.files?.length || 0)) acc.push(index);
+                            return acc;
+                        }, [])
+                        .slice(-3)
+                );
+
+                return source
+                    .filter(message => message?.role === 'user' || message?.role === 'model')
+                    .map((message, index) => {
+                        const role = message.role === 'model' ? 'assistant' : 'user';
+                        const content = [];
+
+                        if (typeof message.text === 'string' && message.text.trim()) {
+                            content.push({
+                                type: role === 'assistant' ? 'output_text' : 'input_text',
+                                text: message.text.trim()
+                            });
+                        }
+
+                        if (role === 'user') {
+                            const includeAttachments = recentAttachmentIndices.has(index);
+                            const images = Array.isArray(message.imgs) ? message.imgs : [];
+                            const files = Array.isArray(message.files) ? message.files : [];
+                            const refsText = buildAttachmentReferenceText(images, files);
+
+                            if (includeAttachments) {
+                                if (refsText) content.push({ type: 'input_text', text: refsText });
+                                images.forEach(img => {
+                                    const imageUrl = assetDataUrl(img);
+                                    if (!imageUrl) return;
+                                    content.push({ type: 'input_image', image_url: imageUrl, detail: 'auto' });
+                                });
+
+                                files.forEach(file => {
+                                    content.push({ type: 'input_text', text: buildCodexFileSummary(file) });
+                                });
+                            } else if (images.length || files.length) {
+                                const labels = [];
+                                if (images.length) labels.push(`${images.length} imagem(ns)`);
+                                if (files.length) labels.push(`${files.length} arquivo(s)`);
+                                content.push({
+                                    type: 'input_text',
+                                    text: `[Anexos omitidos do contexto binario: ${labels.join(' e ')}]\n${refsText}`
+                                });
+                            }
+                        }
+
+                        return content.length ? { role, content } : null;
+                    })
+                    .filter(Boolean);
+            }
+
+            async function requestCodexChat({ auth, model, reasoning, instructions, input, tools, signal }) {
+                if (!auth) throw new Error('Cole a credencial do Codex antes de enviar.');
+
+                const user = window.__skillflowAccount?.getUser?.();
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        provider: 'codex',
+                        auth,
+                        model,
+                        reasoning: normalizeCodexReasoning(reasoning),
+                        history_limit: CODEX_DEFAULT_HISTORY_LIMIT,
+                        instructions: instructions || undefined,
+                        input,
+                        tools,
+                        session_id: user?.id ? `${user.id}-skillflow` : 'skillflow'
+                    }),
+                    signal
+                });
+
+                let data = null;
+                try { data = await res.json(); } catch (_) { }
+
+                if (!res.ok || !data?.ok) {
+                    throw new Error(data?.error || `Codex falhou com HTTP ${res.status}`);
+                }
+
+                if (data.auth) persistCodexAuth(data.auth);
+                return data;
+            }
+
+            function stringifyCodexToolOutput(result) {
+                if (typeof result === 'string') return result;
+                try {
+                    return JSON.stringify(result ?? null, null, 2);
+                } catch (_) {
+                    return String(result);
+                }
+            }
+
+            function codexUsageTotalTokens(usage) {
+                if (!usage || typeof usage !== 'object') return 0;
+                return Number(usage.total_tokens || usage.totalTokens || usage.output_tokens || usage.outputTokens || 0) || 0;
+            }
+
+            async function fetchLocalJson(url, options) {
+                const res = await fetch(url, {
+                    credentials: 'same-origin',
+                    cache: 'no-store',
+                    ...options
+                });
+                const ct = res.headers.get('content-type') || '';
+                const data = ct.includes('application/json')
+                    ? await res.json().catch(() => ({}))
+                    : { error: await res.text().catch(() => '') };
+                if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                return data;
+            }
+
+            function summarizePlugin(plugin) {
+                return {
+                    id: plugin.id,
+                    name: plugin.name,
+                    description: plugin.description || '',
+                    enabled: plugin.enabled !== false,
+                    builtin: plugin.builtin === true,
+                    source: plugin.builtin ? 'builtin' : 'custom'
+                };
+            }
+
+            async function discoverWorkspaceSkillCandidates(path) {
+                const basePath = String(path || '').trim();
+                const payload = await fetchLocalJson('/api/fs/list?path=' + encodeURIComponent(basePath));
+                const items = Array.isArray(payload.items) ? payload.items : [];
+                const directories = items.filter(item => item.type === 'directory');
+                const candidates = [];
+
+                for (const entry of directories) {
+                    const name = String(entry.name || '');
+                    if (!/^skill[-_]/i.test(name)) continue;
+
+                    let nestedItems = [];
+                    try {
+                        const nested = await fetchLocalJson('/api/fs/list?path=' + encodeURIComponent(entry.path || name));
+                        nestedItems = Array.isArray(nested.items) ? nested.items : [];
+                    } catch (_) { }
+
+                    const files = nestedItems
+                        .filter(item => item.type === 'file')
+                        .map(item => item.name);
+
+                    const markers = files.filter(fileName =>
+                        /^main\./i.test(fileName)
+                        || /^readme/i.test(fileName)
+                        || /^requirements/i.test(fileName)
+                        || /^skill\.json$/i.test(fileName)
+                        || /^manifest\.json$/i.test(fileName)
+                    );
+
+                    candidates.push({
+                        name,
+                        path: entry.path || name,
+                        files,
+                        markers,
+                        status: markers.some(fileName => /^skill\.json$|^manifest\.json$/i.test(fileName))
+                            ? 'manifest-ready'
+                            : 'workspace-only'
+                    });
+                }
+
+                return {
+                    path: payload.path || basePath,
+                    candidates,
+                    total_candidates: candidates.length
+                };
+            }
+
+            // ─═══════════════════════════════════════════════════════════════════
+            // PLUGIN ARENA — Dynamic Function Calling System
+            // ─═══════════════════════════════════════════════════════════════════
+
+            const BUILTIN_HANDLERS = {
+                get_history(args) {
+                    const msgs = convs[activeId]?.msgs || [];
+                    const turns = Math.min(Math.max(1, args.turns || 10), 100);
+                    const fromStart = args.from_start === true;
+                    const pairs = [];
+                    for (let i = 0; i < msgs.length - 1; i += 2)
+                        pairs.push({ user: msgs[i], model: msgs[i + 1] || null });
+                    const slice = fromStart ? pairs.slice(0, turns) : pairs.slice(-turns);
+                    const history = slice.map((p, idx) => {
+                        const ts = new Date(p.user.ts).toLocaleString('pt-BR');
+                        const imgNote = p.user.imgs?.length ? ` [${p.user.imgs.length} img]` : '';
+                        const mt = p.model ? (p.model.text?.slice(0, 400) + (p.model.text?.length > 400 ? '…' : '')) : '[sem resposta]';
+                        return `--- Turno ${idx + 1} (${ts}) ---\nUSUÁRIO: ${p.user.text || ''}${imgNote}\nMODELO: ${mt}`;
+                    }).join('\n\n');
+                    return { total_messages: msgs.length, turns_returned: slice.length, history: history || '(vazio)' };
+                },
+                get_current_time(args) {
+                    const now = new Date();
+                    const tz = args.timezone || 'America/Sao_Paulo';
+                    return { iso: now.toISOString(), local: now.toLocaleString('pt-BR', { timeZone: tz }), timestamp_ms: now.getTime() };
+                },
+                get_conversation_stats(args) {
+                    const msgs = convs[activeId]?.msgs || [];
+                    const u = msgs.filter(m => m.role === 'user'), mo = msgs.filter(m => m.role === 'model');
+                    return {
+                        total_messages: msgs.length, user_messages: u.length, model_messages: mo.length,
+                        total_images: u.reduce((a, m) => a + (m.imgs?.length || 0), 0),
+                        total_tokens: mo.reduce((a, m) => a + (m.tok || 0), 0),
+                        conversations_stored: Object.keys(convs).length,
+                        title: convs[activeId]?.title || ''
+                    };
+                },
+                search_conversation(args) {
+                    const q = (args.query || '').toLowerCase();
+                    if (!q) return { error: 'query obrigatório' };
+                    const msgs = convs[activeId]?.msgs || [];
+                    const results = msgs.reduce((acc, m, i) => {
+                        if (m.text?.toLowerCase().includes(q)) {
+                            const idx2 = m.text.toLowerCase().indexOf(q);
+                            acc.push({
+                                index: i, role: m.role, ts: new Date(m.ts).toLocaleString('pt-BR'),
+                                excerpt: m.text.slice(Math.max(0, idx2 - 60), idx2 + 120)
+                            });
+                        } return acc;
+                    }, []);
+                    return { query: q, found: results.length, results: results.slice(0, 15) };
+                },
+                calculate(args) {
+                    const expr = args.expression || '';
+                    try {
+                        const result = Function('"use strict"; return (' + expr + ')')();
+                        return { expression: expr, result, type: typeof result };
+                    } catch (e) { return { error: e.message }; }
+                },
+                async get_workspace_context(args) {
+                    const cfg = readCfg();
+                    const memory = JSON.parse(localStorage.getItem('gc_user_memory') || '{}');
+                    const user = window.__skillflowAccount?.getUser?.() || null;
+                    const workspaceSkills = await discoverWorkspaceSkillCandidates(args.path || '');
+                    return {
+                        user: user ? { id: user.id, login: user.login } : null,
+                        active_conversation: convs[activeId]?.title || '',
+                        model: cfg.model || document.getElementById('model-sel')?.value || '',
+                        system_prompt: document.getElementById('sysp')?.value || '',
+                        enabled_skills: plugins.filter(p => p.enabled).map(summarizePlugin),
+                        registered_skills: plugins.map(summarizePlugin),
+                        workspace_skill_candidates: workspaceSkills.candidates,
+                        memory_namespaces: Object.keys(memory)
+                    };
+                },
+                async list_skill_marketplace(args) {
+                    const workspaceSkills = await discoverWorkspaceSkillCandidates(args.path || '');
+                    return {
+                        registered_skills: plugins.map(summarizePlugin),
+                        enabled_skills: plugins.filter(p => p.enabled).map(summarizePlugin),
+                        workspace_skill_candidates: workspaceSkills.candidates,
+                        note: 'Arquivos criados na workspace nao viram skills automaticamente; para isso use save_registered_skill.'
+                    };
+                },
+                async list_registered_skills() {
+                    const data = await fetchLocalJson('/api/skills');
+                    return {
+                        skills: Array.isArray(data.skills) ? data.skills.map(summarizePlugin) : [],
+                        total: Array.isArray(data.skills) ? data.skills.length : 0
+                    };
+                },
+                async discover_workspace_skills(args) {
+                    return discoverWorkspaceSkillCandidates(args.path || '');
+                },
+                async save_registered_skill(args) {
+                    const skillName = String(args.name || args.id || '').trim();
+                    const skillDescription = String(args.description || '').trim();
+                    if (!skillName) return { error: 'name obrigatorio' };
+                    if (!skillDescription) return { error: 'description obrigatorio' };
+                    if (!(args.action && typeof args.action === 'object') && !String(args.code || '').trim()) {
+                        return { error: 'forneca code ou action para registrar a skill' };
+                    }
+
+                    const payload = {
+                        id: String(args.id || args.name || '').trim(),
+                        name: skillName,
+                        description: skillDescription,
+                        icon: String(args.icon || '⚙').trim() || '⚙',
+                        enabled: args.enabled !== false,
+                        parameters: args.parameters && typeof args.parameters === 'object'
+                            ? args.parameters
+                            : { type: 'OBJECT', properties: {} }
+                    };
+
+                    if (args.action && typeof args.action === 'object') payload.action = args.action;
+                    else payload.code = String(args.code || '').trim();
+
+                    const data = await fetchLocalJson('/api/skills', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    await loadPlugins();
+                    return {
+                        ok: true,
+                        skill: data.skill || null,
+                        note: 'Skill registrada na plataforma. Criar arquivos na workspace, sozinho, nao registra uma skill.'
+                    };
+                },
+                async delete_registered_skill(args) {
+                    const id = String(args.id || '').trim();
+                    if (!id) return { error: 'id obrigatorio' };
+                    await fetchLocalJson('/api/skills/' + encodeURIComponent(id), { method: 'DELETE' });
+                    await loadPlugins();
+                    return { ok: true, id };
+                },
+                attach_workspace_file_to_chat(args) {
+                    const rawPath = String(args.path || '').trim();
+                    if (!rawPath) return { error: 'path obrigatorio' };
+                    const normalizedPath = resolveChatPath('', rawPath);
+                    if (!normalizedPath) return { error: 'path invalido' };
+                    const fileName = String(args.name || messageFileName({ path: normalizedPath }) || 'arquivo').trim();
+                    const mimeType = String(args.mimeType || guessMimeTypeFromFileName(fileName)).trim() || 'application/octet-stream';
+                    const answer = String(args.message || args.answer || `Arquivo preparado: ${fileName}`).trim();
+                    return {
+                        ok: true,
+                        answer,
+                        artifacts: [{
+                            path: normalizedPath,
+                            name: fileName,
+                            mimeType
+                        }]
+                    };
+                },
+                async create_text_file_for_user(args) {
+                    const path = String(args.path || '').trim();
+                    const content = String(args.content || '');
+                    if (!path) return { error: 'path obrigatorio' };
+                    if (!content) return { error: 'content obrigatorio' };
+                    const normalizedPath = resolveChatPath('', path);
+                    if (!normalizedPath) return { error: 'path invalido' };
+                    const payload = await fetchLocalJson('/api/fs/write', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            path: normalizedPath,
+                            content,
+                            create_dirs: args.create_dirs !== false
+                        })
+                    });
+                    const fileName = String(args.name || messageFileName({ path: normalizedPath }) || 'arquivo').trim();
+                    const mimeType = String(args.mimeType || guessMimeTypeFromFileName(fileName)).trim() || 'text/plain';
+                    const answer = String(args.message || args.answer || `Arquivo criado: ${fileName}`).trim();
+                    return {
+                        ok: true,
+                        answer,
+                        write: payload,
+                        artifacts: [{
+                            path: payload.path || normalizedPath,
+                            name: fileName,
+                            mimeType
+                        }]
+                    };
+                }
+            };
+
+            const DEFAULT_PLUGINS = [
+                {
+                    id: 'bi_history', builtin: true, enabled: true, name: 'get_history',
+                    description: 'Recupera mensagens anteriores desta conversa. Use quando o usuário referenciar algo dito antes que não está no contexto atual.',
+                    parameters: { type: 'OBJECT', properties: { turns: { type: 'INTEGER', description: 'Turnos a recuperar (1-100)' }, from_start: { type: 'BOOLEAN', description: 'Se true retorna do início' } }, required: ['turns'] }
+                },
+                {
+                    id: 'bi_time', builtin: true, enabled: true, name: 'get_current_time',
+                    description: 'Retorna data e hora atual do sistema do usuário.',
+                    parameters: { type: 'OBJECT', properties: { timezone: { type: 'STRING', description: 'Fuso IANA ex: America/Sao_Paulo' } } }
+                },
+                {
+                    id: 'bi_stats', builtin: true, enabled: true, name: 'get_conversation_stats',
+                    description: 'Estatísticas da conversa: mensagens, tokens usados, imagens enviadas.',
+                    parameters: { type: 'OBJECT', properties: {} }
+                },
+                {
+                    id: 'bi_search', builtin: true, enabled: true, name: 'search_conversation',
+                    description: 'Busca mensagens na conversa atual que contenham texto específico.',
+                    parameters: { type: 'OBJECT', properties: { query: { type: 'STRING', description: 'Texto a buscar' } }, required: ['query'] }
+                },
+                {
+                    id: 'bi_calc', builtin: true, enabled: true, name: 'calculate',
+                    description: 'Avalia expressões matemáticas precisas. Use para cálculos numéricos.',
+                    parameters: { type: 'OBJECT', properties: { expression: { type: 'STRING', description: 'Expressão JS ex: 2+2*10, Math.sqrt(144)' } }, required: ['expression'] }
+                },
+
+                // ── Declarative HTTP plugin (action type) ──
+                {
+                    id: 'bi_http_read', builtin: false, enabled: true, icon: '🌐', name: 'http_request',
+                    description: 'Acessa uma URL e lê o conteúdo da página em formato Markdown limpo. Use para ler artigos, posts, documentação ou extrair links de uma página para continuar navegando.',
+                    parameters: { url: { type: 'STRING', description: 'A URL completa para acessar (ex: https://exemplo.com/post)', required: true } },
+                    action: {
+                        type: 'http', method: 'GET',
+                        url: 'https://r.jina.ai/{{url}}',
+                        headers: { 'X-With-Links-Summary': 'true', 'X-Return-Format': 'markdown', 'Accept': 'text/plain' }
+                    }
+                },
+                {
+                    id: 'wf_ghost_search', builtin: false, enabled: true, icon: '👻', name: 'ghost_search',
+                    description: 'Pesquisa na web via Ghost Search API (api.ghost1.cloud). Use para internet, notícias e research com filtros de modelo, foco, tempo e citações.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            query: { type: 'STRING', description: 'Pergunta ou busca principal' },
+                            model: { type: 'STRING', description: 'Modelo opcional. Ex: best, claude-4.6-opus' },
+                            focus: { type: 'STRING', description: 'Foco opcional: web, academic, youtube, reddit, wolfram' },
+                            time_range: { type: 'STRING', description: 'Janela opcional: all, day, week, month, year' },
+                            citation_mode: { type: 'STRING', description: 'Modo de citação opcional: markdown, default, clean' },
+                            user_id: { type: 'STRING', description: 'ID opcional do usuário ou conversa' }
+                        },
+                        required: ['query']
+                    },
+                    action: {
+                        type: 'http',
+                        method: 'POST',
+                        url: '/api/ghost-search',
+                        headers: { 'Content-Type': 'application/json' },
+                        defaults: { model: 'best', focus: 'web', time_range: 'all', citation_mode: 'markdown' },
+                        pruneEmpty: true,
+                        body: {
+                            query: '{{query}}',
+                            model: '{{model}}',
+                            focus: '{{focus}}',
+                            time_range: '{{time_range}}',
+                            citation_mode: '{{citation_mode}}',
+                            user_id: '{{user_id}}'
+                        }
+                    }
+                },
+                {
+                    id: 'sv_fs_list', builtin: false, enabled: true, icon: '📁', name: 'server_list_files',
+                    description: 'Lista arquivos e pastas da workspace do servidor via backend local. Isso navega somente a workspace do usuario e nao o registro real de skills da plataforma.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            path: { type: 'STRING', description: 'Caminho relativo dentro da workspace. Ex: "", docs, src/components' }
+                        }
+                    },
+                    action: {
+                        type: 'http',
+                        method: 'GET',
+                        url: '/api/fs/list?path={{path}}'
+                    }
+                },
+                {
+                    id: 'sv_fs_read', builtin: false, enabled: true, icon: '📄', name: 'server_read_file',
+                    description: 'Lê um arquivo de texto da workspace do servidor via backend local. Use para abrir, inspecionar e reutilizar arquivos existentes no deploy.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            path: { type: 'STRING', description: 'Caminho relativo do arquivo. Ex: notes/todo.md' }
+                        },
+                        required: ['path']
+                    },
+                    action: {
+                        type: 'http',
+                        method: 'GET',
+                        url: '/api/fs/read?path={{path}}'
+                    }
+                },
+                {
+                    id: 'sv_fs_write', builtin: false, enabled: true, icon: '📝', name: 'server_write_file',
+                    description: 'Cria ou edita um arquivo de texto na workspace do servidor via backend local. Isso cria arquivo real, mas nao registra uma skill da plataforma por si so.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            path: { type: 'STRING', description: 'Caminho relativo do arquivo a criar ou editar' },
+                            content: { type: 'STRING', description: 'Conteúdo completo a salvar no arquivo' },
+                            create_dirs: { type: 'BOOLEAN', description: 'Cria pastas pai automaticamente quando necessário' }
+                        },
+                        required: ['path', 'content']
+                    },
+                    action: {
+                        type: 'http',
+                        method: 'POST',
+                        url: '/api/fs/write',
+                        headers: { 'Content-Type': 'application/json' },
+                        defaults: { create_dirs: true },
+                        body: {
+                            path: '{{path}}',
+                            content: '{{content}}',
+                            create_dirs: '{{create_dirs}}'
+                        }
+                    }
+                },
+                {
+                    id: 'sv_fs_mkdir', builtin: false, enabled: true, icon: '📂', name: 'server_make_directory',
+                    description: 'Cria uma pasta na workspace do servidor via backend local. Isso so cria diretorio na workspace; nao cria uma skill registrada.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            path: { type: 'STRING', description: 'Caminho relativo da pasta. Ex: docs/releases' }
+                        },
+                        required: ['path']
+                    },
+                    action: {
+                        type: 'http',
+                        method: 'POST',
+                        url: '/api/fs/mkdir',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: {
+                            path: '{{path}}'
+                        }
+                    }
+                },
+                {
+                    id: 'sv_fs_rename', builtin: false, enabled: true, icon: '✏️', name: 'server_rename_path',
+                    description: 'Renomeia ou move um arquivo/pasta dentro da workspace do servidor via backend local.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            path: { type: 'STRING', description: 'Caminho atual' },
+                            next_path: { type: 'STRING', description: 'Novo caminho relativo' }
+                        },
+                        required: ['path', 'next_path']
+                    },
+                    action: {
+                        type: 'http',
+                        method: 'POST',
+                        url: '/api/fs/rename',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: {
+                            path: '{{path}}',
+                            next_path: '{{next_path}}'
+                        }
+                    }
+                },
+                {
+                    id: 'sv_fs_delete', builtin: false, enabled: true, icon: '🗑️', name: 'server_delete_path',
+                    description: 'Apaga um arquivo ou pasta da workspace do servidor via backend local. Use com cuidado para exclusões reais no deploy.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            path: { type: 'STRING', description: 'Caminho relativo do arquivo ou pasta a apagar' }
+                        },
+                        required: ['path']
+                    },
+                    action: {
+                        type: 'http',
+                        method: 'DELETE',
+                        url: '/api/fs/delete?path={{path}}'
+                    }
+                },
+                {
+                    id: 'wf_context', builtin: true, enabled: true, icon: '🗂️', name: 'get_workspace_context',
+                    description: 'Retorna o contexto real do usuario atual: conversa, modelo, skills registradas, skills habilitadas e pastas skill_* encontradas na workspace.',
+                    parameters: { type: 'OBJECT', properties: { path: { type: 'STRING', description: 'Caminho opcional dentro da workspace para procurar skill_*' } } }
+                },
+                {
+                    id: 'wf_memory_set', builtin: false, enabled: true, icon: '🧠', name: 'save_user_memory',
+                    description: 'Salva uma memória curta ou longa do usuário em LocalStorage para preferências, contexto recorrente e projeto.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            key: { type: 'STRING', description: 'Chave da memória' },
+                            value: { type: 'STRING', description: 'Valor a ser salvo' },
+                            namespace: { type: 'STRING', description: 'Agrupador opcional, ex: user, workspace, project' }
+                        },
+                        required: ['key', 'value']
+                    },
+                    code: `
+const bag = JSON.parse(localStorage.getItem('gc_user_memory') || '{}');
+const ns = args.namespace || 'user';
+if (!bag[ns]) bag[ns] = {};
+bag[ns][args.key] = { value: args.value, updated_at: new Date().toISOString() };
+                setStorageItem('gc_user_memory', JSON.stringify(bag), { silent: true });
+return { ok: true, namespace: ns, key: args.key, stored: bag[ns][args.key] };`
+                },
+                {
+                    id: 'wf_memory_get', builtin: false, enabled: true, icon: '📚', name: 'read_user_memory',
+                    description: 'Lê memórias salvas do usuário ou do projeto para personalização e continuidade.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            namespace: { type: 'STRING', description: 'Agrupador opcional, ex: user, workspace, project' },
+                            key: { type: 'STRING', description: 'Chave específica opcional' }
+                        }
+                    },
+                    code: `
+const bag = JSON.parse(localStorage.getItem('gc_user_memory') || '{}');
+const ns = args.namespace || 'user';
+if (!bag[ns]) return { namespace: ns, entries: {} };
+if (args.key) return { namespace: ns, key: args.key, value: bag[ns][args.key] ?? null };
+return { namespace: ns, entries: bag[ns] };`
+                },
+                {
+                    id: 'wf_approval', builtin: false, enabled: true, icon: '🛡️', name: 'request_human_approval',
+                    description: 'Registra uma aprovação humana pendente para ações sensíveis como publicar, deletar, pagar ou enviar para sistemas externos.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            action: { type: 'STRING', description: 'Ação que precisa de aprovação' },
+                            reason: { type: 'STRING', description: 'Justificativa e risco da ação' },
+                            risk: { type: 'STRING', description: 'Nível de risco, ex: baixo, médio, alto' }
+                        },
+                        required: ['action', 'reason']
+                    },
+                    code: `
+const approvals = JSON.parse(localStorage.getItem('gc_pending_approvals') || '[]');
+const item = {
+  id: 'appr_' + Date.now(),
+  action: args.action,
+  reason: args.reason,
+  risk: args.risk || 'médio',
+  status: 'pending',
+  created_at: new Date().toISOString(),
+  conversation: convs[activeId]?.title || ''
+};
+approvals.unshift(item);
+                setStorageItem('gc_pending_approvals', JSON.stringify(approvals), { silent: true });
+return item;`
+                },
+                {
+                    id: 'wf_market', builtin: true, enabled: true, icon: '🧩', name: 'list_skill_marketplace',
+                    description: 'Lista as skills reais registradas, as skills habilitadas e as pastas skill_* da workspace do usuario atual. Nao retorna catalogo fake.',
+                    parameters: { type: 'OBJECT', properties: { path: { type: 'STRING', description: 'Caminho opcional dentro da workspace para procurar skill_*' } } }
+                },
+                {
+                    id: 'sv_skill_list', builtin: true, enabled: true, icon: '🧾', name: 'list_registered_skills',
+                    description: 'Lista as skills customizadas reais salvas no registro da plataforma para o usuario atual.',
+                    parameters: { type: 'OBJECT', properties: {} }
+                },
+                {
+                    id: 'sv_skill_discover', builtin: true, enabled: true, icon: '🔎', name: 'discover_workspace_skills',
+                    description: 'Procura pastas skill_* dentro da workspace do usuario atual e mostra quais parecem candidatas a skill.',
+                    parameters: { type: 'OBJECT', properties: { path: { type: 'STRING', description: 'Caminho opcional dentro da workspace para procurar skill_*' } } }
+                },
+                {
+                    id: 'sv_skill_save', builtin: true, enabled: true, icon: '✨', name: 'save_registered_skill',
+                    description: 'Cria ou atualiza uma skill real no registro da plataforma. Use esta tool quando precisar criar uma skill utilizavel; escrever arquivos na workspace nao basta.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            id: { type: 'STRING', description: 'ID estavel da skill' },
+                            name: { type: 'STRING', description: 'Nome da skill' },
+                            description: { type: 'STRING', description: 'Descricao objetiva do que a skill faz' },
+                            icon: { type: 'STRING', description: 'Icone opcional' },
+                            enabled: { type: 'BOOLEAN', description: 'Se a skill deve nascer habilitada' },
+                            parameters: { type: 'OBJECT', description: 'Schema JSON dos parametros da skill', properties: {} },
+                            code: { type: 'STRING', description: 'Codigo JavaScript da skill. Forneca code ou action.' },
+                            action: { type: 'OBJECT', description: 'Acao HTTP opcional da skill. Forneca code ou action.', properties: {} }
+                        },
+                        required: ['name', 'description']
+                    }
+                },
+                {
+                    id: 'sv_skill_delete', builtin: true, enabled: true, icon: '🗑️', name: 'delete_registered_skill',
+                    description: 'Apaga uma skill customizada real do registro da plataforma pelo id.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            id: { type: 'STRING', description: 'ID da skill a apagar' }
+                        },
+                        required: ['id']
+                    }
+                },
+                {
+                    id: 'wf_attach_file_chat', builtin: true, enabled: true, icon: '📎', name: 'attach_workspace_file_to_chat',
+                    description: 'Anexa um arquivo ja existente da workspace persistente do usuario na resposta do chat. Use quando precisar entregar um arquivo ao usuario na conversa.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            path: { type: 'STRING', description: 'Caminho relativo do arquivo ja existente na workspace do usuario. Ex: .uploads/2026-03/images/saida.png' },
+                            name: { type: 'STRING', description: 'Nome de exibicao opcional no chat' },
+                            mimeType: { type: 'STRING', description: 'Mime type opcional. Ex: image/png, text/plain, application/pdf' },
+                            message: { type: 'STRING', description: 'Texto curto opcional para acompanhar o arquivo' }
+                        },
+                        required: ['path']
+                    }
+                },
+                {
+                    id: 'wf_create_text_file', builtin: true, enabled: true, icon: '📄', name: 'create_text_file_for_user',
+                    description: 'Cria um arquivo de texto, markdown, json ou csv na workspace persistente do usuario e devolve esse arquivo como anexo na conversa.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            path: { type: 'STRING', description: 'Caminho relativo do arquivo a criar. Ex: .outputs/relatorios/resumo.md' },
+                            content: { type: 'STRING', description: 'Conteudo completo do arquivo' },
+                            name: { type: 'STRING', description: 'Nome de exibicao opcional no chat' },
+                            mimeType: { type: 'STRING', description: 'Mime type opcional. Ex: text/plain, text/markdown, application/json' },
+                            create_dirs: { type: 'BOOLEAN', description: 'Cria pastas pai automaticamente' },
+                            message: { type: 'STRING', description: 'Texto curto opcional para acompanhar o arquivo' }
+                        },
+                        required: ['path', 'content']
+                    }
+                }
+            ];
+
+            let plugins = [];
+            let customPluginIds = new Set();
+
+            function clonePlugin(p) {
+                return JSON.parse(JSON.stringify(p));
+            }
+
+            function mergePlugins(defaults, customs, stored) {
+                const storedList = Array.isArray(stored) ? stored : [];
+                const storedById = new Map(storedList.map(p => [p.id, p]));
+                const mergedDefaults = defaults.map(p => {
+                    const saved = storedById.get(p.id) || {};
+                    return { ...clonePlugin(p), enabled: saved.enabled ?? p.enabled };
+                });
+                const defaultIds = new Set(mergedDefaults.map(p => p.id));
+                const normalizedCustoms = (Array.isArray(customs) ? customs : [])
+                    .filter(p => p && !defaultIds.has(p.id))
+                    .map(p => {
+                        const saved = storedById.get(p.id) || {};
+                        return { ...clonePlugin(p), enabled: saved.enabled ?? (p.enabled !== false) };
+                    });
+                customPluginIds = new Set(normalizedCustoms.map(p => p.id));
+                return [...mergedDefaults, ...normalizedCustoms];
+            }
+
+            async function fetchCustomPlugins() {
+                const res = await fetch('/api/skills');
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                return Array.isArray(data.skills) ? data.skills : [];
+            }
+
+            async function persistCustomPlugin(plugin) {
+                const res = await fetch('/api/skills', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(plugin)
+                });
+                if (!res.ok) {
+                    let msg = 'HTTP ' + res.status;
+                    try { const err = await res.json(); msg = err.error || msg; } catch (_) { }
+                    throw new Error(msg);
+                }
+                const data = await res.json();
+                customPluginIds.add(data.skill?.id || plugin.id);
+                return data.skill || plugin;
+            }
+
+            async function deleteCustomPluginOnServer(id) {
+                const res = await fetch('/api/skills/' + encodeURIComponent(id), { method: 'DELETE' });
+                if (!res.ok) {
+                    let msg = 'HTTP ' + res.status;
+                    try { const err = await res.json(); msg = err.error || msg; } catch (_) { }
+                    throw new Error(msg);
+                }
+                customPluginIds.delete(id);
+            }
+
+            async function loadPlugins() {
+                const stored = JSON.parse(localStorage.getItem('gc_plugins') || 'null');
+                try {
+                    const customs = await fetchCustomPlugins();
+                    plugins = mergePlugins(DEFAULT_PLUGINS, customs, stored);
+                } catch (e) {
+                    console.warn('Falha ao carregar skills do servidor:', e.message);
+                    if (!stored) plugins = DEFAULT_PLUGINS.map(p => ({ ...p }));
+                    else {
+                        const storedIds = new Set(stored.map(p => p.id));
+                        plugins = [...stored, ...DEFAULT_PLUGINS.filter(p => !storedIds.has(p.id))];
+                    }
+                    customPluginIds = new Set(plugins.filter(p => !p.builtin).map(p => p.id));
+                }
+                savePlugins(false);
+                renderPluginList();
+            }
+
+            function savePlugins(syncServer = true) {
+                setStorageItem('gc_plugins', JSON.stringify(plugins), { silent: true });
+            }
+
+            function buildTools() {
+                const enabled = plugins.filter(p => p.enabled);
+                if (!enabled.length) return [];
+                return [{
+                    functionDeclarations: enabled.map(p => ({
+                        name: p.name,
+                        description: p.description,
+                        parameters: normalizeParams(p.parameters)
+                    }))
+                }];
+            }
+
+            const OPENAI_SCHEMA_TYPE_MAP = {
+                OBJECT: 'object',
+                STRING: 'string',
+                NUMBER: 'number',
+                INTEGER: 'integer',
+                BOOLEAN: 'boolean',
+                ARRAY: 'array',
+                NULL: 'null'
+            };
+
+            // ─ RESOLVE template {{param}} in strings ─
+            function resolveTemplate(template, args) {
+                return String(template).replace(/\{\{(\w+)\}\}/g, (_, k) => encodeURIComponent(args[k] ?? ''));
+            }
+
+            function resolveTemplateRaw(template, args) {
+                return String(template).replace(/\{\{(\w+)\}\}/g, (_, k) => String(args[k] ?? ''));
+            }
+
+            function resolveTemplateValue(value, args, raw) {
+                if (typeof value === 'string') {
+                    const exact = value.match(/^\{\{(\w+)\}\}$/);
+                    if (exact && Object.prototype.hasOwnProperty.call(args || {}, exact[1])) {
+                        return args[exact[1]];
+                    }
+                    return (raw ? resolveTemplateRaw : resolveTemplate)(value, args);
+                }
+                if (Array.isArray(value)) return value.map(v => resolveTemplateValue(v, args, raw));
+                if (value && typeof value === 'object') {
+                    const out = {};
+                    Object.entries(value).forEach(([k, v]) => out[k] = resolveTemplateValue(v, args, raw));
+                    return out;
+                }
+                return value;
+            }
+
+            function sleep(ms) {
+                return new Promise(resolve => setTimeout(resolve, ms));
+            }
+
+            function defaultPluginAction(type) {
+                if (type === 'http') {
+                    return {
+                        type: 'http',
+                        method: 'GET',
+                        url: 'https://example.com?q={{input}}'
+                    };
+                }
+
+                if (type === 'exec') {
+                    return {
+                        type: 'exec',
+                        command: 'python',
+                        args: ['script.py', '{{input}}'],
+                        cwd: '',
+                        timeout_ms: 120000,
+                        wait: true,
+                        poll_interval_ms: 700,
+                        tail_bytes: 16000
+                    };
+                }
+
+                return {};
+            }
+
+            async function runExecPluginAction(name, action, args) {
+                const actionArgs = { ...(action.defaults || {}), ...(args || {}) };
+                const payload = {
+                    title: resolveTemplateValue(action.title || name, actionArgs, true),
+                    command: resolveTemplateValue(action.command, actionArgs, true),
+                    args: resolveTemplateValue(action.args, actionArgs, true),
+                    shell: resolveTemplateValue(action.shell, actionArgs, true),
+                    cwd: resolveTemplateValue(action.cwd, actionArgs, true),
+                    env: resolveTemplateValue(action.env, actionArgs, true),
+                    stdin: resolveTemplateValue(action.stdin, actionArgs, true),
+                    timeout_ms: resolveTemplateValue(action.timeout_ms, actionArgs, true)
+                };
+
+                if (!payload.command || typeof payload.command !== 'string') {
+                    return { error: `Exec plugin '${name}' sem command valido` };
+                }
+
+                if (action.pruneEmpty) {
+                    Object.keys(payload).forEach((key) => {
+                        if (payload[key] === '' || payload[key] === null || payload[key] === undefined) {
+                            delete payload[key];
+                        }
+                    });
+                }
+
+                try {
+                    const created = await fetchLocalJson('/api/exec', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    const run = created.run || null;
+                    if (!run?.id) {
+                        return { error: `Exec plugin '${name}' nao recebeu id de execucao` };
+                    }
+
+                    const wait = action.wait !== false && action.wait !== 'false';
+                    if (!wait) {
+                        return { ok: true, queued: true, run };
+                    }
+
+                    const pollIntervalMs = Math.max(150, Number.parseInt(String(action.poll_interval_ms ?? 700), 10) || 700);
+                    const maxPolls = Math.max(1, Number.parseInt(String(action.max_polls ?? 240), 10) || 240);
+                    let current = run;
+
+                    for (let index = 0; index < maxPolls; index += 1) {
+                        const status = await fetchLocalJson('/api/exec/' + encodeURIComponent(run.id));
+                        current = status.run || current;
+                        if (current.status !== 'running') break;
+                        await sleep(pollIntervalMs);
+                    }
+
+                    const artifacts = normalizeMessageFiles(
+                        resolveTemplateValue(action.artifacts || [], actionArgs, true),
+                        payload.cwd || ''
+                    );
+                    const includeLogs = String(action.include_logs || 'both').trim().toLowerCase();
+                    if (includeLogs === 'none') {
+                        return { ok: true, run: current, artifacts };
+                    }
+
+                    const tailBytes = Math.max(512, Number.parseInt(String(action.tail_bytes ?? 16000), 10) || 16000);
+                    const logs = await fetchLocalJson(
+                        '/api/exec/' + encodeURIComponent(run.id) + '/logs?stream=' + encodeURIComponent(includeLogs) + '&tail_bytes=' + tailBytes
+                    );
+
+                    return {
+                        ok: current?.status === 'completed',
+                        run: current,
+                        logs,
+                        artifacts
+                    };
+                } catch (e) {
+                    return { error: `Exec plugin '${name}': ${e.message}` };
+                }
+            }
+
+            function normalizeChatPath(value) {
+                return String(value || '')
+                    .replace(/\\/g, '/')
+                    .replace(/^\/+/, '')
+                    .replace(/\/+/g, '/')
+                    .trim();
+            }
+
+            function resolveChatPath(basePath, filePath) {
+                const base = normalizeChatPath(basePath);
+                const target = normalizeChatPath(filePath);
+                if (!target) return base;
+                const joined = `${base ? base + '/' : ''}${target}`;
+                const out = [];
+                joined.split('/').forEach(part => {
+                    if (!part || part === '.') return;
+                    if (part === '..') {
+                        if (out.length) out.pop();
+                        return;
+                    }
+                    out.push(part);
+                });
+                return out.join('/');
+            }
+
+            function messageFileName(file) {
+                const raw = String(file?.name || file?.path || file?.downloadUrl || 'arquivo').trim();
+                const pathish = raw.split('?')[0];
+                const parts = pathish.split('/').filter(Boolean);
+                return parts.at(-1) || raw || 'arquivo';
+            }
+
+            function guessMimeTypeFromFileName(name) {
+                const lower = String(name || '').toLowerCase();
+                if (lower.endsWith('.png')) return 'image/png';
+                if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+                if (lower.endsWith('.webp')) return 'image/webp';
+                if (lower.endsWith('.gif')) return 'image/gif';
+                if (lower.endsWith('.svg')) return 'image/svg+xml';
+                if (lower.endsWith('.pdf')) return 'application/pdf';
+                if (lower.endsWith('.json')) return 'application/json';
+                if (lower.endsWith('.csv')) return 'text/csv';
+                if (lower.endsWith('.md')) return 'text/markdown';
+                if (lower.endsWith('.html')) return 'text/html';
+                if (lower.endsWith('.txt') || lower.endsWith('.log')) return 'text/plain';
+                if (lower.endsWith('.js')) return 'text/javascript';
+                if (lower.endsWith('.ts')) return 'text/typescript';
+                if (lower.endsWith('.py')) return 'text/x-python';
+                if (lower.endsWith('.css')) return 'text/css';
+                if (lower.endsWith('.xml')) return 'application/xml';
+                if (lower.endsWith('.zip')) return 'application/zip';
+                return 'application/octet-stream';
+            }
+
+            function fileIconForMessage(file) {
+                const mimeType = String(file?.mimeType || file?.type || '').toLowerCase();
+                const name = String(file?.name || file?.path || '').toLowerCase();
+                if (mimeType.startsWith('image/')) return '🖼️';
+                if (mimeType.includes('pdf') || name.endsWith('.pdf')) return '📄';
+                if (mimeType.includes('json') || name.endsWith('.json')) return '{}';
+                if (mimeType.includes('zip') || mimeType.includes('gzip') || /\.(zip|gz|tgz|7z|rar)$/.test(name)) return '🗜️';
+                if (mimeType.includes('audio') || /\.(mp3|wav|ogg|m4a)$/.test(name)) return '🎵';
+                if (mimeType.includes('video') || /\.(mp4|mov|webm|mkv)$/.test(name)) return '🎬';
+                return '📝';
+            }
+
+            function buildMessageFileDownloadUrl(file) {
+                if (file?.downloadUrl) return String(file.downloadUrl);
+                if (file?.path) return '/api/fs/download?path=' + encodeURIComponent(file.path);
+                if (file?.url) return String(file.url);
+                return '';
+            }
+
+            function normalizeMessageFiles(files, basePath) {
+                if (!Array.isArray(files)) return [];
+
+                return files
+                    .map(file => {
+                        const item = typeof file === 'string' ? { path: file } : file;
+                        if (!item || typeof item !== 'object') return null;
+
+                        const rawPath = item.path || item.workspacePath || item.relPath || '';
+                        const resolvedPath = rawPath ? resolveChatPath(basePath, rawPath) : '';
+                        const name = String(item.name || resolvedPath.split('/').filter(Boolean).at(-1) || 'arquivo').trim();
+                        const mimeType = String(item.mimeType || item.type || '').trim();
+                        const normalized = {
+                            name,
+                            mimeType
+                        };
+
+                        if (resolvedPath) normalized.path = resolvedPath;
+                        if (item.size !== undefined && item.size !== null) normalized.size = item.size;
+
+                        const downloadUrl = buildMessageFileDownloadUrl({ ...item, path: resolvedPath || item.path });
+                        if (downloadUrl) normalized.downloadUrl = downloadUrl;
+
+                        return normalized;
+                    })
+                    .filter(Boolean);
+            }
+
+            function mergeMessageFiles(existing, incoming) {
+                const merged = [];
+                const seen = new Set();
+
+                [...(Array.isArray(existing) ? existing : []), ...(Array.isArray(incoming) ? incoming : [])]
+                    .forEach(file => {
+                        if (!file || typeof file !== 'object') return;
+                        const key = file.path || file.downloadUrl || `${file.name || ''}:${file.mimeType || ''}`;
+                        if (!key || seen.has(key)) return;
+                        seen.add(key);
+                        merged.push(file);
+                    });
+
+                return merged;
+            }
+
+            function extractToolArtifacts(result, basePath) {
+                if (!result || typeof result !== 'object') return [];
+                const artifacts = Array.isArray(result.artifacts)
+                    ? result.artifacts
+                    : Array.isArray(result.files)
+                        ? result.files
+                        : Array.isArray(result.attachments)
+                            ? result.attachments
+                            : (result.artifact || result.file || result.attachment
+                                ? [result.artifact || result.file || result.attachment]
+                                : []);
+                const resolvedBasePath = basePath || result.artifact_base_path || result.artifactBasePath || result.basePath || result.cwd || '';
+                return normalizeMessageFiles(artifacts, resolvedBasePath);
+            }
+
+            function trimTraceText(value, maxLen = 420) {
+                const text = String(value ?? '')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                if (!text) return '';
+                return text.length > maxLen ? text.slice(0, Math.max(0, maxLen - 1)) + '…' : text;
+            }
+
+            function summarizeTraceValue(value, maxLen = 420) {
+                if (value === null || value === undefined || value === '') return '';
+                if (typeof value === 'string') return trimTraceText(value, maxLen);
+                if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+                try {
+                    return trimTraceText(JSON.stringify(value, null, 2), maxLen);
+                } catch (_) {
+                    return trimTraceText(String(value), maxLen);
+                }
+            }
+
+            function summarizeTraceArgs(args) {
+                if (!args || typeof args !== 'object' || Array.isArray(args)) return '';
+                const entries = Object.entries(args)
+                    .slice(0, 8)
+                    .map(([key, value]) => `${key}=${summarizeTraceValue(value, 90)}`);
+                return trimTraceText(entries.join(', '), 320);
+            }
+
+            function summarizeToolResult(result) {
+                const files = extractToolArtifacts(result);
+                const parts = [];
+                const primary = trimTraceText(
+                    result?.answer
+                    || result?.message
+                    || result?.summary
+                    || result?.note
+                    || result?.error
+                    || '',
+                    260
+                );
+                if (primary) parts.push(primary);
+                if (typeof result?.ok === 'boolean') parts.push(result.ok ? 'ok=true' : 'ok=false');
+                if (typeof result?.status === 'number') parts.push(`status=${result.status}`);
+                if (files.length) parts.push(`artifacts=${files.length}`);
+                if (!parts.length) {
+                    const fallback = summarizeTraceValue(result, 260);
+                    if (fallback) parts.push(fallback);
+                }
+                return trimTraceText(parts.join(' | '), 320);
+            }
+
+            function createTraceStep(type, options = {}) {
+                return {
+                    type: String(type || 'event'),
+                    title: trimTraceText(options.title || options.label || type || 'evento', 120),
+                    meta: trimTraceText(options.meta || '', 240),
+                    body: summarizeTraceValue(options.body || '', 700),
+                    ts: options.ts || Date.now()
+                };
+            }
+
+            function ensureMessageTrace(message) {
+                if (!message || typeof message !== 'object') return [];
+                if (!Array.isArray(message.trace)) message.trace = [];
+                return message.trace;
+            }
+
+            function pushMessageTrace(message, step) {
+                const trace = ensureMessageTrace(message);
+                if (!step || typeof step !== 'object') return trace;
+                trace.push(step);
+                if (trace.length > 30) trace.splice(0, trace.length - 30);
+                return trace;
+            }
+
+            function pushToolCallTrace(message, call) {
+                pushMessageTrace(message, createTraceStep('tool_call', {
+                    title: call?.name || 'tool',
+                    meta: summarizeTraceArgs(call?.arguments || call?.args || {}),
+                    body: call?.arguments_raw
+                        ? trimTraceText(call.arguments_raw, 500)
+                        : ''
+                }));
+            }
+
+            function pushToolResultTrace(message, callName, result) {
+                const files = extractToolArtifacts(result);
+                const resultSummary = summarizeToolResult(result);
+                const extra = [];
+                if (files.length) extra.push(`${files.length} artifact${files.length > 1 ? 's' : ''}`);
+                pushMessageTrace(message, createTraceStep('tool_result', {
+                    title: callName || 'tool_result',
+                    meta: extra.join(' • '),
+                    body: resultSummary
+                }));
+            }
+
+            function buildTraceSummary(trace) {
+                const steps = Array.isArray(trace) ? trace : [];
+                const toolCalls = steps.filter(step => step?.type === 'tool_call').length;
+                const label = steps.some(step => step?.type === 'thinking') ? 'thinking' : 'trace';
+                const extra = [];
+                if (toolCalls) extra.push(`${toolCalls} skill${toolCalls > 1 ? 's' : ''}`);
+                extra.push(`${steps.length} passo${steps.length > 1 ? 's' : ''}`);
+                return {
+                    label,
+                    meta: extra.join(' • ')
+                };
+            }
+
+            function renderMessageTrace(trace) {
+                const steps = Array.isArray(trace) ? trace.filter(Boolean) : [];
+                if (!steps.length) return '';
+                const summary = buildTraceSummary(steps);
+                return `<details class="msg-trace">
+  <summary>
+    <span class="msg-trace-title">${esc(summary.label)}</span>
+    <span class="msg-trace-count">${esc(summary.meta)}</span>
+  </summary>
+  <div class="msg-trace-steps">
+    ${steps.map(step => `<div class="trace-step trace-step-${esc(step.type || 'event')}">
+      <div class="trace-step-head">
+        <span class="trace-step-title">${esc(step.title || step.type || 'evento')}</span>
+        <span class="trace-step-type">${esc(step.type || 'event')}</span>
+      </div>
+      ${step.meta ? `<div class="trace-step-meta">${esc(step.meta)}</div>` : ''}
+      ${step.body ? `<div class="trace-step-body">${esc(step.body)}</div>` : ''}
+    </div>`).join('')}
+  </div>
+</details>`;
+            }
+
+            function pruneEmptyFields(value) {
+                if (Array.isArray(value)) {
+                    return value
+                        .map(pruneEmptyFields)
+                        .filter(v => v !== '' && v !== null && v !== undefined);
+                }
+                if (value && typeof value === 'object') {
+                    const out = {};
+                    Object.entries(value).forEach(([k, v]) => {
+                        const next = pruneEmptyFields(v);
+                        if (next !== '' && next !== null && next !== undefined) out[k] = next;
+                    });
+                    return out;
+                }
+                return value;
+            }
+
+            // ─ NORMALIZE parameter format: supports flat {url:{type,description}} OR JSON Schema ─
+            function normalizeParams(raw) {
+                if (!raw) return { type: 'OBJECT', properties: {} };
+                if (raw.type === 'OBJECT' && raw.properties) return raw; // already JSON Schema
+                // Flat format: { url: { type, description, required } }
+                const props = {};
+                const req = [];
+                Object.entries(raw).forEach(([k, v]) => {
+                    props[k] = { type: v.type || 'STRING', description: v.description || '' };
+                    if (v.required) req.push(k);
+                });
+                return { type: 'OBJECT', properties: props, ...(req.length ? { required: req } : {}) };
+            }
+
+            // Recursively lowercase all "type" values in a schema (for Live API / raw WebSocket)
+            function lowercaseTypes(obj) {
+                if (!obj || typeof obj !== 'object') return obj;
+                if (Array.isArray(obj)) return obj.map(lowercaseTypes);
+                const out = {};
+                for (const [k, v] of Object.entries(obj)) {
+                    if (k === 'type' && typeof v === 'string') out[k] = v.toLowerCase();
+                    else out[k] = lowercaseTypes(v);
+                }
+                return out;
+            }
+
+            function normalizeOpenAISchemaNode(value) {
+                if (Array.isArray(value)) return value.map(normalizeOpenAISchemaNode);
+                if (!value || typeof value !== 'object') return value;
+
+                const out = {};
+                Object.entries(value).forEach(([key, nested]) => {
+                    if (key === 'type' && typeof nested === 'string') {
+                        const mapped = OPENAI_SCHEMA_TYPE_MAP[nested.toUpperCase()];
+                        out[key] = mapped || nested.toLowerCase();
+                        return;
+                    }
+                    out[key] = normalizeOpenAISchemaNode(nested);
+                });
+                return out;
+            }
+
+            function normalizeCodexToolName(name, fallback) {
+                const raw = String(name || fallback || 'tool')
+                    .normalize('NFD')
+                    .replace(/[\u0300-\u036f]/g, '')
+                    .replace(/[^a-zA-Z0-9_-]+/g, '_')
+                    .replace(/^_+|_+$/g, '')
+                    .slice(0, 64);
+
+                if (raw) return raw;
+
+                return String(fallback || 'tool')
+                    .replace(/[^a-zA-Z0-9_-]+/g, '_')
+                    .replace(/^_+|_+$/g, '')
+                    .slice(0, 64) || 'tool';
+            }
+
+            function buildCodexToolEntries() {
+                const used = new Set();
+
+                return plugins
+                    .filter(p => p.enabled)
+                    .map((plugin, index) => {
+                        const base = normalizeCodexToolName(plugin.name, plugin.id || `tool_${index}`);
+                        let callName = base;
+                        let suffix = 1;
+
+                        while (used.has(callName)) {
+                            const suffixText = `_${suffix++}`;
+                            callName = `${base.slice(0, Math.max(1, 64 - suffixText.length))}${suffixText}`;
+                        }
+
+                        used.add(callName);
+                        return { plugin, callName };
+                    });
+            }
+
+            function buildCodexTools() {
+                return buildCodexToolEntries().map(({ plugin, callName }) => ({
+                    type: 'function',
+                    name: callName,
+                    description: plugin.description || '',
+                    parameters: normalizeOpenAISchemaNode(normalizeParams(plugin.parameters)),
+                    strict: false
+                }));
+            }
+
+            async function executePlugin(name, args) {
+                const codexEntry = buildCodexToolEntries().find(entry => entry.callName === name);
+                const p = plugins.find(x => x.name === name && x.enabled) || codexEntry?.plugin;
+                if (!p) return { error: `Plugin '${name}' não encontrado` };
+
+                // ── Built-in native handler ──
+                if (p.builtin) {
+                    const h = BUILTIN_HANDLERS[p.name];
+                    if (!h) return { error: `Handler builtin '${name}' não implementado` };
+                    try { return h(args); } catch (e) { return { error: e.message }; }
+                }
+
+                const actionType = p.action?.type || 'code';
+                if (actionType === 'exec') {
+                    return runExecPluginAction(name, p.action || {}, args || {});
+                }
+
+                // ── HTTP action ──
+                if (actionType === 'http') {
+                    try {
+                        const method = (p.action.method || 'GET').toUpperCase();
+                        const actionArgs = { ...(p.action.defaults || {}), ...(args || {}) };
+                        const url = resolveTemplate(p.action.url, actionArgs);
+                        const headers = {};
+                        if (p.action.headers) {
+                            Object.entries(p.action.headers).forEach(([k, v]) => {
+                                headers[k] = resolveTemplateRaw(String(v), actionArgs);
+                            });
+                        }
+                        const fetchOpts = { method, headers };
+                        if (method !== 'GET' && p.action.body) {
+                            let bodyPayload = resolveTemplateValue(p.action.body, actionArgs, true);
+                            if (p.action.pruneEmpty) bodyPayload = pruneEmptyFields(bodyPayload);
+                            fetchOpts.body = JSON.stringify(bodyPayload);
+                            headers['Content-Type'] = headers['Content-Type'] || 'application/json';
+                        }
+                        const res = await fetch(url, fetchOpts);
+                        const text = await res.text();
+                        // Truncate large responses
+                        const truncated = text.length > 8000;
+                        return {
+                            status: res.status,
+                            ok: res.ok,
+                            url,
+                            content: text.slice(0, 8000) + (truncated ? '\n\n[...truncado em 8000 chars]' : ''),
+                            content_length: text.length
+                        };
+                    } catch (e) { return { error: `HTTP plugin '${name}': ${e.message}` }; }
+                }
+
+                // ── Code action (default) ──
+                if (!p.code?.trim()) return { error: 'Plugin sem código e sem action' };
+                try {
+                    const fn = new Function('args', 'convs', 'activeId', p.code);
+                    return fn(args, convs, activeId) ?? { result: 'ok' };
+                } catch (e) { return { error: `Plugin '${name}': ${e.message}` }; }
+            }
+
+            // ─ PLUGIN ARENA UI ─
+            let activePluginId = null;
+
+            function togglePlugins() {
+                const panel = document.getElementById('plugin-panel');
+                const btn = document.getElementById('plugin-btn');
+                const open = panel.classList.toggle('on');
+                btn.classList.toggle('on', open);
+            }
+
+            function renderPluginList() {
+                const list = document.getElementById('plugin-list');
+                if (!list) return;
+                list.innerHTML = plugins.map(p => `
+    <div class='plugin-item ${p.id === activePluginId ? 'active' : ''}' onclick='selectPlugin(\"${p.id}\")'>
+      <div class='plugin-item-header'>
+        <span class='plugin-name'>${esc(p.name)}</span>
+        ${p.builtin ? '<span class=\"plugin-badge\">built-in</span>' : ''}
+        <label class='toggle' onclick='event.stopPropagation()'>
+          <input type='checkbox' ${p.enabled ? 'checked' : ''} onchange='togglePlugin(\"${p.id}\",this.checked)'>
+          <span class='toggle-slider'></span>
+        </label>
+      </div>
+      <div class='plugin-desc'>${esc((p.description || '').slice(0, 55))}${(p.description || '').length > 55 ? '…' : ''}</div>
+    </div>`).join('');
+            }
+
+            function togglePlugin(id, enabled) {
+                const p = plugins.find(x => x.id === id);
+                if (p) {
+                    p.enabled = enabled;
+                    savePlugins(false);
+                    if (!p.builtin && customPluginIds.has(id)) {
+                        persistCustomPlugin(p).catch(e => toast('❌ Skill: ' + e.message.slice(0, 60)));
+                    }
+                }
+            }
+
+            function selectPlugin(id) {
+                activePluginId = id;
+                renderPluginList();
+                const p = plugins.find(x => x.id === id);
+                if (!p) return;
+                const editor = document.getElementById('plugin-editor');
+                editor.classList.remove('empty');
+                const paramsStr = JSON.stringify(p.parameters || {}, null, 2);
+                editor.innerHTML = `
+    <div class='editor-grid'>
+      <div class='editor-field'>
+        <label>Nome da Função</label>
+        <input class='editor-input' id='pe-name' value='${esc(p.name)}' ${p.builtin ? 'disabled' : ''}>
+      </div>
+      <div class='editor-field' style='justify-content:flex-end;padding-top:18px'>
+        <span class='fn-badge'>${p.builtin ? '🔒 built-in' : '⚙ custom'}</span>
+      </div>
+      <div class='editor-field full'>
+        <label>Descrição <span>o modelo usa isso para decidir quando chamar</span></label>
+        <textarea class='editor-code' id='pe-desc' style='min-height:52px;font-family:inherit'>${esc(p.description || '')}</textarea>
+      </div>
+      <div class='editor-field full'>
+        <label>Parâmetros <span>JSON Schema ou flat {param:{type,description,required}}</span></label>
+        <textarea class='editor-code' id='pe-params'>${esc(paramsStr)}</textarea>
+      </div>
+      <div class='editor-field full'>
+        <label>Action type: <b style='color:var(--accent2)'>${p.action?.type || 'code'}</b>
+          <select id='pe-action-type' style='background:var(--s2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:2px 6px;font-size:11px;outline:none' onchange='onActionTypeChange()'>
+            <option value='code' ${(!p.action || p.action.type === 'code') ? 'selected' : ''}>code (JS)</option>
+            <option value='http' ${p.action?.type === 'http' ? 'selected' : ''}>http (fetch)</option>
+            <option value='exec' ${p.action?.type === 'exec' ? 'selected' : ''}>exec (server)</option>
+          </select>
+        </label>
+        <textarea class='editor-code' id='pe-action' style='min-height:90px;display:${p.action?.type && p.action.type !== 'code' ? 'block' : 'none'}'>${esc(JSON.stringify(p.action || {}, null, 2))}</textarea>
+      </div>
+      <div class='editor-field full' id='pe-code-wrap' style='display:${!p.action?.type || p.action.type === 'code' ? 'block' : 'none'}'>
+        <label>Código JS <span>disponível: args, convs, activeId</span></label>
+        <textarea class='editor-code' id='pe-code' style='min-height:110px'>${esc(p.code || '// args disponível\nreturn { result: args.input };')}</textarea>
+      </div>
+    </div>
+    <div class='editor-actions'>
+      <button class='btn-save' onclick='savePluginEdit(\"${id}\")'>💾 Salvar</button>
+      <button class='btn-test' onclick='testPlugin(\"${id}\")'>▶ Testar</button>
+      ${!p.builtin ? `<button class='btn-delete' onclick='deletePlugin(\"${id}\")'>🗑 Deletar</button>` : ''}
+    </div>
+    <div class='test-output' id='test-out'></div>`,
+                    false;
+            }
+
+            function onActionTypeChange() {
+                const t = document.getElementById('pe-action-type')?.value;
+                const actionEl = document.getElementById('pe-action');
+                const codeWrap = document.getElementById('pe-code-wrap');
+                if (actionEl) {
+                    actionEl.style.display = t === 'code' ? 'none' : 'block';
+                    const current = String(actionEl.value || '').trim();
+                    if (t !== 'code' && (!current || current === '{}' || current === '{\n\n}')) {
+                        actionEl.value = JSON.stringify(defaultPluginAction(t), null, 2);
+                    }
+                }
+                if (codeWrap) codeWrap.style.display = t === 'code' ? 'block' : 'none';
+            }
+
+            async function savePluginEdit(id) {
+                const p = plugins.find(x => x.id === id); if (!p) return;
+                const ne = document.getElementById('pe-name');
+                const de = document.getElementById('pe-desc');
+                const pe = document.getElementById('pe-params');
+                const ce = document.getElementById('pe-code');
+                const ae = document.getElementById('pe-action');
+                const at = document.getElementById('pe-action-type');
+                if (!p.builtin && ne) p.name = ne.value.trim().replace(/\s+/g, '_');
+                if (de) p.description = de.value.trim();
+                if (pe) { try { p.parameters = JSON.parse(pe.value); } catch (e) { toast('❌ Parâmetros JSON inválido: ' + e.message); return; } }
+                if (!p.builtin && plugins.some(x => x.id !== p.id && x.name === p.name)) {
+                    toast('❌ Já existe uma skill com esse nome.');
+                    return;
+                }
+                const actionType = at?.value || 'code';
+                if (actionType === 'http' || actionType === 'exec') {
+                    if (ae) { try { p.action = JSON.parse(ae.value); } catch (e) { toast('❌ Action JSON inválido: ' + e.message); return; } }
+                    delete p.code;
+                } else {
+                    if (!p.builtin && ce) p.code = ce.value;
+                    delete p.action;
+                }
+                savePlugins(false);
+                if (!p.builtin) {
+                    try {
+                        const saved = await persistCustomPlugin(p);
+                        Object.assign(p, saved);
+                    } catch (e) {
+                        toast('❌ Skill: ' + e.message);
+                        return;
+                    }
+                }
+                renderPluginList();
+                selectPlugin(id);
+                toast('✓ Plugin salvo!');
+            }
+
+            async function testPlugin(id) {
+                const p = plugins.find(x => x.id === id); if (!p) return;
+                const testArgs = {};
+                Object.entries(p.parameters?.properties || {}).forEach(([k, v]) => {
+                    testArgs[k] = v.type === 'INTEGER' || v.type === 'NUMBER' ? 3 : v.type === 'BOOLEAN' ? false : 'test';
+                });
+                const out = document.getElementById('test-out');
+                if (out) {
+                    out.style.display = 'block';
+                    out.textContent = 'Executando...';
+                }
+                const result = await executePlugin(p.name, testArgs);
+                if (out) { out.textContent = JSON.stringify(result, null, 2); }
+            }
+
+            async function deletePlugin(id) {
+                if (!confirm('Deletar este plugin?')) return;
+                const target = plugins.find(x => x.id === id);
+                plugins = plugins.filter(x => x.id !== id);
+                activePluginId = null; savePlugins(); renderPluginList();
+                const ed = document.getElementById('plugin-editor');
+                ed.classList.add('empty'); ed.innerHTML = '← Selecione ou crie uma skill';
+                if (target && !target.builtin && customPluginIds.has(id)) {
+                    try { await deleteCustomPluginOnServer(id); }
+                    catch (e) { toast('❌ Skill: ' + e.message); }
+                }
+                toast('🗑 Skill deletada.');
+            }
+
+            function newPlugin() {
+                const id = 'custom_' + Date.now();
+                plugins.push({
+                    id, builtin: false, enabled: true,
+                    name: 'skill_' + plugins.filter(p => !p.builtin).length,
+                    description: 'Descreva o que esta skill faz.',
+                    parameters: { type: 'OBJECT', properties: { input: { type: 'STRING', description: 'Entrada' } }, required: ['input'] },
+                    code: '// args.input disponível\nreturn { result: args.input };'
+                });
+                savePlugins(); renderPluginList(); selectPlugin(id);
+                if (!document.getElementById('plugin-panel').classList.contains('on')) togglePlugins();
+                toast('✓ Nova skill criada!');
+            }
+
+            // ─ THEME TOGGLE ─
+            function toggleTheme() {
+                const html = document.documentElement;
+                const current = html.getAttribute('data-theme');
+                const next = current === 'dark' ? 'light' : 'dark';
+                html.setAttribute('data-theme', next);
+                document.getElementById('theme-btn').textContent = next === 'dark' ? '🌙' : '☀️';
+                setStorageItem('gc_theme', next, { silent: true });
+                initMermaid();
+                // Re-render mermaid diagrams with new theme
+                document.querySelectorAll('.mermaid[data-rendered]').forEach(el => {
+                    const src = el.getAttribute('data-src');
+                    el.removeAttribute('data-rendered');
+                    el.innerHTML = '';
+                    if (src) el.setAttribute('data-src', src);
+                });
+                renderMermaidBlocks();
+            }
+
+            // ─ SIDEBAR ─
+            function openSidebar() {
+                const sb = document.getElementById('sidebar');
+                // On mobile: remove collapsed (if any) and open as drawer
+                // On desktop: if collapsed, expand it properly
+                if (window.innerWidth <= 768) {
+                    sb.classList.remove('collapsed');
+                    sb.classList.add('open');
+                    document.getElementById('overlay').classList.add('show');
+                } else {
+                    // Desktop: toggle collapsed state
+                    toggleSidebarDesktop();
+                }
+            }
+            function closeSidebar() {
+                document.getElementById('sidebar').classList.remove('open');
+                document.getElementById('overlay').classList.remove('show');
+            }
+            function toggleSidebarDesktop() {
+                const sb = document.getElementById('sidebar');
+                sb.classList.toggle('collapsed');
+                const isCollapsed = sb.classList.contains('collapsed');
+                // Toggle body class so sb-btn shows via CSS when sidebar is hidden
+                document.body.classList.toggle('sb-collapsed', isCollapsed);
+                setStorageItem('gc_sb_collapsed', isCollapsed ? '1' : '0', { silent: true });
+            }
+
+            // ─ SETTINGS ─
+            const DEFAULT_MODEL_ADVANCED_SETTINGS = {
+                temp: '1.0',
+                topp: '0.95',
+                topk: '64',
+                maxt: '8192',
+                think: ''
+            };
+
+            function toggleCfg() {
+                const p = document.getElementById('cfg');
+                const b = document.getElementById('cfg-btn');
+                const open = p.classList.toggle('on');
+                b.classList.toggle('on', open);
+                if (open) applyModelAdvancedVisibility();
+            }
+
+            function modelUsesSamplingControls(model) {
+                return !isCodexModel(model) && !isLiveModel(model);
+            }
+
+            function modelUsesMaxTokensControl(model) {
+                return !isCodexModel(model) && !isLiveModel(model);
+            }
+
+            function setAdvancedSectionOpen(open) {
+                const body = document.getElementById('cfg-model-advanced');
+                const btn = document.getElementById('cfg-model-advanced-toggle');
+                if (body) body.classList.toggle('on', !!open);
+                if (btn) {
+                    btn.classList.toggle('on', !!open);
+                    btn.textContent = open ? 'Esconder ajustes avançados' : 'Mostrar ajustes avançados';
+                }
+            }
+
+            function toggleModelAdvancedSettings(force) {
+                const body = document.getElementById('cfg-model-advanced');
+                const next = typeof force === 'boolean' ? force : !body?.classList.contains('on');
+                setAdvancedSectionOpen(next);
+            }
+
+            function resetModelAdvancedSettings() {
+                document.getElementById('temp').value = DEFAULT_MODEL_ADVANCED_SETTINGS.temp;
+                document.getElementById('tv').textContent = Number(DEFAULT_MODEL_ADVANCED_SETTINGS.temp).toFixed(2);
+                document.getElementById('topp').value = DEFAULT_MODEL_ADVANCED_SETTINGS.topp;
+                document.getElementById('ppv').textContent = Number(DEFAULT_MODEL_ADVANCED_SETTINGS.topp).toFixed(2);
+                document.getElementById('topk').value = DEFAULT_MODEL_ADVANCED_SETTINGS.topk;
+                document.getElementById('kv').textContent = DEFAULT_MODEL_ADVANCED_SETTINGS.topk;
+                document.getElementById('maxt').value = DEFAULT_MODEL_ADVANCED_SETTINGS.maxt;
+                document.getElementById('think-lvl').value = DEFAULT_MODEL_ADVANCED_SETTINGS.think;
+                save();
+                toast('✓ Ajustes avançados restaurados para o padrão.');
+            }
+
+            function applyModelAdvancedVisibility() {
+                const m = document.getElementById('model-sel').value;
+                const hasSampling = modelUsesSamplingControls(m);
+                const hasMaxTokens = modelUsesMaxTokensControl(m);
+                const hasThinking = supportsThinking(m) || isCodexModel(m);
+                const hasAnyAdvanced = hasSampling || hasMaxTokens || hasThinking;
+                document.getElementById('temp-grp').style.display = hasSampling ? 'flex' : 'none';
+                document.getElementById('topp-grp').style.display = hasSampling ? 'flex' : 'none';
+                document.getElementById('topk-grp').style.display = hasSampling ? 'flex' : 'none';
+                document.getElementById('maxt-grp').style.display = hasMaxTokens ? 'flex' : 'none';
+                document.getElementById('think-grp').style.display = hasThinking ? 'flex' : 'none';
+                document.getElementById('cfg-model-advanced-toggle').style.display = hasAnyAdvanced ? '' : 'none';
+                document.getElementById('cfg-model-defaults').style.display = hasAnyAdvanced ? '' : 'none';
+                if (!hasAnyAdvanced) setAdvancedSectionOpen(false);
+
+                const hint = document.getElementById('cfg-model-hint');
+                if (hint) {
+                    if (isLiveModel(m)) hint.textContent = 'No Gemini Live, esses sliders não entram no modo WebSocket.';
+                    else if (isCodexModel(m)) hint.textContent = 'Nos modelos Codex/GPT-5, use reasoning; sampling clássico fica oculto.';
+                    else hint.textContent = 'Os controles avançados ficam escondidos por padrão.';
+                }
+            }
+
+            async function onModelChange() {
+                const model = document.getElementById('model-sel').value;
+                const live = isLiveModel(model);
+                const shouldRestartLive = liveMode || geminiLive.active || liveRecognitionActive || liveRecognition;
+                if (isListening) stopSpeech();
+                if (shouldRestartLive) {
+                    liveStop({ silent: true });
+                }
+                syncThinkLevelOptions();
+                applyModelAdvancedVisibility();
+                syncProviderInput();
+                // Toggle TTS vs Live voice sections
+                const ttsGrp = document.getElementById('tts-voice-grp');
+                const liveGrp = document.getElementById('live-voice-grp');
+                const liveScreenBtn = document.getElementById('live-screen-btn');
+                if (ttsGrp) ttsGrp.style.display = live ? 'none' : '';
+                if (liveGrp) liveGrp.style.display = live ? '' : 'none';
+                if (liveScreenBtn) liveScreenBtn.style.display = live ? 'inline-flex' : 'none';
+                // Toggle LIVE badge in topbar
+                document.getElementById('live-model-badge')?.classList.toggle('on', live);
+                save();
+                if (shouldRestartLive) {
+                    await startLiveForCurrentModel({ silent: true });
+                }
+            }
+
+            // ─ PERSIST ─
+            var convs = JSON.parse(localStorage.getItem('gc_convs') || '{}');
+            var activeId = null;
+            let generationControllers = new Map();
+            let generationSeq = 0;
+            let pendingImages = [];
+            let systemPromptPresets = [];
+
+            function refreshGenerationUi() {
+                const hasActive = generationControllers.size > 0;
+                document.getElementById('send-btn').disabled = false;
+                document.getElementById('stop-btn').style.display = hasActive ? 'flex' : 'none';
+            }
+
+            function renderSystemPromptPresetOptions(selectedId = '') {
+                const sel = document.getElementById('sysp-preset-sel');
+                if (!sel) return;
+                const wanted = String(selectedId || '');
+                sel.innerHTML = '<option value="">Preset compartilhado...</option>' +
+                    systemPromptPresets.map(item => `<option value="${esc(item.id)}">${esc(item.name)}</option>`).join('');
+                sel.value = systemPromptPresets.some(item => item.id === wanted) ? wanted : '';
+            }
+
+            async function loadSystemPromptPresets(selectedId = null) {
+                try {
+                    const res = await fetch('/api/system-prompts');
+                    const data = await res.json();
+                    systemPromptPresets = Array.isArray(data.items) ? data.items : [];
+                    const cfg = readCfg();
+                    renderSystemPromptPresetOptions(selectedId ?? (cfg.systemPromptPresetId || ''));
+                } catch (error) {
+                    console.warn('[SystemPrompts] Falha ao carregar presets:', error);
+                    systemPromptPresets = [];
+                    renderSystemPromptPresetOptions('');
+                }
+            }
+
+            function applySelectedSystemPrompt() {
+                const sel = document.getElementById('sysp-preset-sel');
+                const promptBox = document.getElementById('sysp');
+                if (!sel || !promptBox) return;
+                const preset = systemPromptPresets.find(item => item.id === sel.value);
+                if (!preset) {
+                    toast('⚠ Selecione um preset compartilhado.');
+                    return;
+                }
+                promptBox.value = preset.prompt || '';
+                save();
+                toast(`✓ Preset aplicado: ${preset.name}`);
+            }
+
+            async function saveCurrentSystemPromptPreset() {
+                const promptBox = document.getElementById('sysp');
+                if (!promptBox || !promptBox.value.trim()) {
+                    toast('⚠ Escreva um system prompt antes de salvar.');
+                    return;
+                }
+                const currentId = document.getElementById('sysp-preset-sel')?.value || '';
+                const current = systemPromptPresets.find(item => item.id === currentId);
+                const suggested = current?.name || 'Novo preset compartilhado';
+                const name = window.prompt('Nome do preset compartilhado:', suggested);
+                if (!name || !name.trim()) return;
+                try {
+                    const res = await fetch('/api/system-prompts', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            id: currentId || undefined,
+                            name: name.trim(),
+                            prompt: promptBox.value
+                        })
+                    });
+                    const data = await res.json();
+                    if (!res.ok || !data?.item?.id) throw new Error(data?.error || 'erro desconhecido');
+                    await loadSystemPromptPresets(data.item.id);
+                    save();
+                    toast(`✓ Preset compartilhado salvo: ${data.item.name}`);
+                } catch (error) {
+                    toast('⚠ Falha ao salvar preset: ' + (error.message || 'erro desconhecido'));
+                }
+            }
+
+            function save() {
+                const prev = readCfg();
+                const model = document.getElementById('model-sel').value;
+                const thinkValue = document.getElementById('think-lvl').value;
+                const next = {
+                    ...prev,
+                    model: document.getElementById('model-sel').value,
+                    temp: document.getElementById('temp').value,
+                    topp: document.getElementById('topp').value,
+                    topk: document.getElementById('topk').value,
+                    maxt: document.getElementById('maxt').value,
+                    sysp: document.getElementById('sysp').value,
+                    systemPromptPresetId: document.getElementById('sysp-preset-sel')?.value || '',
+                    think: isCodexModel(model) ? normalizeCodexReasoning(thinkValue, true) : thinkValue
+                };
+
+                if (isCodexModel(model)) {
+                    next.codexAuthRaw = document.getElementById('api-in').value;
+                    if ((prev.codexAuthRaw || '') !== next.codexAuthRaw) delete next.codexAuth;
+                } else {
+                    next.key = document.getElementById('api-in').value;
+                }
+
+                writeCfg(next);
+            }
+
+            function loadCfg() {
+                ensureCodexModels();
+                const theme = localStorage.getItem('gc_theme') || 'dark';
+                document.documentElement.setAttribute('data-theme', theme);
+                document.getElementById('theme-btn').textContent = theme === 'dark' ? '🌙' : '☀️';
+
+                const s = readCfg();
+                if (s.model) {
+                    const sel = document.getElementById('model-sel');
+                    if ([...sel.options].some(o => o.value === s.model)) sel.value = s.model;
+                }
+                const set = (id, val, disp) => {
+                    if (val === undefined) return;
+                    document.getElementById(id).value = val;
+                    if (disp) document.getElementById(disp).textContent =
+                        (id === 'topk') ? val : parseFloat(val).toFixed(id === 'temp' ? 2 : 2);
+                };
+                set('temp', s.temp, 'tv');
+                set('topp', s.topp, 'ppv');
+                set('topk', s.topk, 'kv');
+                if (s.maxt) document.getElementById('maxt').value = s.maxt;
+                if (s.sysp) document.getElementById('sysp').value = s.sysp;
+                loadSystemPromptPresets(s.systemPromptPresetId || '');
+                syncThinkLevelOptions();
+                if (s.think !== undefined) {
+                    document.getElementById('think-lvl').value = isCodexModel(document.getElementById('model-sel').value)
+                        ? normalizeCodexReasoning(s.think, true)
+                        : s.think;
+                }
+                applyModelAdvancedVisibility();
+                setAdvancedSectionOpen(false);
+                syncProviderInput();
+                loadLiveVoiceCfg();
+                // Apply live model visibility
+                const currentModel = document.getElementById('model-sel').value;
+                const isLive = isLiveModel(currentModel);
+                const ttsGrp = document.getElementById('tts-voice-grp');
+                const liveGrp = document.getElementById('live-voice-grp');
+                const liveScreenBtn = document.getElementById('live-screen-btn');
+                if (ttsGrp) ttsGrp.style.display = isLive ? 'none' : '';
+                if (liveGrp) liveGrp.style.display = isLive ? '' : 'none';
+                if (liveScreenBtn) liveScreenBtn.style.display = isLive ? 'inline-flex' : 'none';
+                document.getElementById('live-model-badge')?.classList.toggle('on', isLive);
+            }
+
+            // ─ EXPORT / IMPORT ─
+            function importedTimestamp(value, fallback = Date.now()) {
+                if (typeof value === 'number' && Number.isFinite(value)) return value;
+                if (typeof value === 'string' && value.trim()) {
+                    const parsedNumber = Number(value);
+                    if (Number.isFinite(parsedNumber)) return parsedNumber;
+                    const parsedDate = Date.parse(value);
+                    if (Number.isFinite(parsedDate)) return parsedDate;
+                }
+                return fallback;
+            }
+
+            function stableHash(value) {
+                let hash = 2166136261;
+                const text = String(value || '');
+                for (let index = 0; index < text.length; index += 1) {
+                    hash ^= text.charCodeAt(index);
+                    hash = Math.imul(hash, 16777619);
+                }
+                return (hash >>> 0).toString(16).padStart(8, '0');
+            }
+
+            function messageFingerprint(message, index = 0) {
+                if (!message || typeof message !== 'object') return `m${index}:empty`;
+                const text = typeof message.text === 'string'
+                    ? message.text
+                    : (typeof message.content === 'string' ? message.content : '');
+                return JSON.stringify({
+                    index,
+                    role: message.role || '',
+                    ts: importedTimestamp(message.ts || message.created_at || message.updated_at, index),
+                    text: text.slice(0, 240),
+                    imgs: Array.isArray(message.imgs) ? message.imgs.length : 0,
+                    files: Array.isArray(message.files) ? message.files.length : 0
+                });
+            }
+
+            function buildConversationUid(conversation) {
+                if (!conversation || typeof conversation !== 'object') return `conv_${stableHash('empty')}`;
+
+                const existingUid = [conversation.uid, conversation.conversation_uid, conversation.conv_uid, conversation.import_uid]
+                    .find(value => typeof value === 'string' && value.trim());
+                if (existingUid) return existingUid.trim();
+
+                const title = typeof conversation.title === 'string' && conversation.title.trim()
+                    ? conversation.title.trim()
+                    : 'Conversa sem titulo';
+                const ts = importedTimestamp(conversation.ts || conversation.updated_at || conversation.created_at, 0);
+                const messages = Array.isArray(conversation.msgs)
+                    ? conversation.msgs
+                    : (Array.isArray(conversation.messages) ? conversation.messages : []);
+                const signature = JSON.stringify({
+                    title,
+                    ts,
+                    count: messages.length,
+                    messages: messages.map((message, index) => messageFingerprint(message, index))
+                });
+                return `conv_${stableHash(signature)}`;
+            }
+
+            function chooseConversationVersion(existingConversation, incomingConversation) {
+                const currentMessages = Array.isArray(existingConversation?.msgs)
+                    ? existingConversation.msgs
+                    : (Array.isArray(existingConversation?.messages) ? existingConversation.messages : []);
+                const nextMessages = Array.isArray(incomingConversation?.msgs)
+                    ? incomingConversation.msgs
+                    : (Array.isArray(incomingConversation?.messages) ? incomingConversation.messages : []);
+
+                if (nextMessages.length > currentMessages.length) return incomingConversation;
+                if (nextMessages.length < currentMessages.length) return existingConversation;
+
+                const currentTs = importedTimestamp(existingConversation?.ts || existingConversation?.updated_at || existingConversation?.created_at, 0);
+                const nextTs = importedTimestamp(incomingConversation?.ts || incomingConversation?.updated_at || incomingConversation?.created_at, 0);
+                return nextTs >= currentTs ? incomingConversation : existingConversation;
+            }
+
+            function newConversationUid() {
+                const uuid = globalThis.crypto?.randomUUID?.();
+                if (uuid) return `conv_${uuid}`;
+                return `conv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+            }
+
+            function normalizeImportedMessage(message, fallbackTs) {
+                if (!message || typeof message !== 'object') return null;
+                const role = message.role === 'model' || message.role === 'assistant' ? 'model' : 'user';
+                const text = typeof message.text === 'string'
+                    ? message.text
+                    : (typeof message.content === 'string' ? message.content : '');
+                return {
+                    ...message,
+                    role,
+                    text,
+                    ts: importedTimestamp(message.ts || message.created_at || message.updated_at, fallbackTs),
+                    imgs: Array.isArray(message.imgs) ? message.imgs.filter(Boolean) : [],
+                    files: Array.isArray(message.files) ? message.files.filter(Boolean) : []
+                };
+            }
+
+            function normalizeImportedConversation(conversation, idHint) {
+                if (!conversation || typeof conversation !== 'object') return null;
+                const now = Date.now();
+                const title = typeof conversation.title === 'string' && conversation.title.trim()
+                    ? conversation.title.trim()
+                    : `Conversa importada ${idHint}`;
+                const sourceMessages = Array.isArray(conversation.msgs)
+                    ? conversation.msgs
+                    : (Array.isArray(conversation.messages) ? conversation.messages : []);
+                const msgs = sourceMessages
+                    .map((message, index) => normalizeImportedMessage(message, importedTimestamp(conversation.ts, now) + index))
+                    .filter(Boolean);
+
+                const normalizedConversation = {
+                    ...conversation,
+                    title,
+                    msgs,
+                    ts: importedTimestamp(conversation.ts || conversation.updated_at || conversation.created_at, now)
+                };
+                normalizedConversation.uid = buildConversationUid(normalizedConversation);
+                return normalizedConversation;
+            }
+
+            function generateImportedConversationId(preferredId, reservedIds = null) {
+                const raw = String(preferredId || '')
+                    .trim()
+                    .replace(/[^a-zA-Z0-9_-]+/g, '_')
+                    .replace(/^_+|_+$/g, '')
+                    .slice(0, 80);
+                const base = raw || ('c' + Date.now());
+                let candidate = base;
+                let suffix = 1;
+                while (convs[candidate] || reservedIds?.has(candidate)) {
+                    candidate = `${base}_${suffix++}`;
+                }
+                return candidate;
+            }
+
+            function extractImportedConversations(payload) {
+                const source = payload && typeof payload === 'object' && !Array.isArray(payload)
+                    ? (payload.convs && typeof payload.convs === 'object'
+                        ? payload.convs
+                        : (payload.conversations && typeof payload.conversations === 'object'
+                            ? payload.conversations
+                            : payload))
+                    : payload;
+
+                const normalized = {};
+                const reservedIds = new Set(Object.keys(convs));
+                const uidToId = new Map();
+
+                Object.entries(convs).forEach(([id, conversation]) => {
+                    uidToId.set(buildConversationUid(conversation), id);
+                });
+
+                const pushConversation = (idHint, conversation) => {
+                    const normalizedConversation = normalizeImportedConversation(conversation, idHint);
+                    if (!normalizedConversation) return;
+                    const uid = buildConversationUid(normalizedConversation);
+                    const existingId = uidToId.get(uid);
+
+                    if (existingId) {
+                        const current = normalized[existingId] || convs[existingId];
+                        normalized[existingId] = chooseConversationVersion(current, normalizedConversation);
+                        normalized[existingId].uid = uid;
+                        return;
+                    }
+
+                    const id = generateImportedConversationId(
+                        idHint || normalizedConversation.id || normalizedConversation.title,
+                        reservedIds
+                    );
+                    normalizedConversation.uid = uid;
+                    normalized[id] = normalizedConversation;
+                    reservedIds.add(id);
+                    uidToId.set(uid, id);
+                };
+
+                if (Array.isArray(source)) {
+                    source.forEach((conversation, index) => {
+                        pushConversation(conversation?.id || `imported_${index + 1}`, conversation);
+                    });
+                    return normalized;
+                }
+
+                if (!source || typeof source !== 'object') return normalized;
+                Object.entries(source).forEach(([id, conversation]) => pushConversation(id, conversation));
+                return normalized;
+            }
+
+            function conversationRecord(value) {
+                return value && typeof value === 'object' ? value : {};
+            }
+
+            function conversationTitle(value, fallback = 'Conversa sem titulo') {
+                const conversation = conversationRecord(value);
+                return typeof conversation.title === 'string' && conversation.title.trim()
+                    ? conversation.title.trim()
+                    : fallback;
+            }
+
+            function conversationMessages(value) {
+                const conversation = conversationRecord(value);
+                return Array.isArray(conversation.msgs)
+                    ? conversation.msgs
+                    : (Array.isArray(conversation.messages) ? conversation.messages : []);
+            }
+
+            function conversationTs(value) {
+                const conversation = conversationRecord(value);
+                return importedTimestamp(conversation.ts || conversation.updated_at || conversation.created_at, 0);
+            }
+
+            function normalizeStoredConversations() {
+                const source = convs && typeof convs === 'object' && !Array.isArray(convs) ? convs : {};
+                const next = {};
+                const uidToId = new Map();
+                let changed = false;
+
+                Object.entries(source).forEach(([id, conversation]) => {
+                    const normalizedConversation = normalizeImportedConversation(conversation, id);
+                    if (!normalizedConversation) {
+                        changed = true;
+                        return;
+                    }
+                    const uid = normalizedConversation.uid;
+                    const existingId = uidToId.get(uid);
+                    if (existingId) {
+                        next[existingId] = chooseConversationVersion(next[existingId], normalizedConversation);
+                        if (activeId === id) activeId = existingId;
+                        changed = true;
+                        return;
+                    }
+
+                    uidToId.set(uid, id);
+                    next[id] = normalizedConversation;
+                    if (conversation?.uid !== normalizedConversation.uid
+                        || !Array.isArray(conversation?.msgs)
+                        || typeof conversation?.title !== 'string') {
+                        changed = true;
+                    }
+                });
+
+                convs = next;
+                return changed;
+            }
+
+            function exportConvs() {
+                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(convs));
+                const el = document.createElement('a');
+                el.setAttribute("href", dataStr);
+                el.setAttribute("download", `gemini_chats_${new Date().toISOString().slice(0, 10)}.json`);
+                document.body.appendChild(el);
+                el.click();
+                el.remove();
+                toast('✓ Conversas exportadas!');
+            }
+
+            function importConvs(e) {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = async function (evt) {
+                    try {
+                        const imported = extractImportedConversations(JSON.parse(evt.target.result));
+                        const importedIds = Object.keys(imported);
+                        if (!importedIds.length) throw new Error('empty-import');
+
+                        convs = { ...convs, ...imported };
+                        activeId = importedIds
+                            .sort((a, b) => (convs[b]?.ts || 0) - (convs[a]?.ts || 0))[0] || activeId;
+                        saveConvs();
+                        renderSidebar();
+                        renderChat();
+                        await window.__skillflowAccount?.syncState?.({ force: true });
+                        toast('✓ Conversas importadas!');
+                    } catch (err) {
+                        console.error('Falha ao importar conversas:', err);
+                        toast('❌ Erro ao importar arquivo.');
+                    }
+                };
+                reader.readAsText(file);
+                e.target.value = '';
+            }
+
+            // ─ CONVERSATIONS ─
+            function compactConversationsForStorage(source) {
+                if (!source || typeof source !== 'object' || Array.isArray(source)) return {};
+                const compacted = {};
+                for (const [id, conversation] of Object.entries(source)) {
+                    if (!conversation || typeof conversation !== 'object') continue;
+                    const msgs = conversationMessages(conversation).map(message => {
+                        if (!message || typeof message !== 'object') return message;
+                        const nextMessage = { ...message };
+
+                        if (Array.isArray(message.imgs)) {
+                            nextMessage.imgs = message.imgs.filter(Boolean).map((img, index) => ({
+                                mimeType: img?.mimeType || 'image/*',
+                                name: img?.name || `imagem-${index + 1}`,
+                                path: img?.path || '',
+                                downloadUrl: img?.downloadUrl || '',
+                                omitted: true
+                            }));
+                        }
+
+                        if (Array.isArray(message.files)) {
+                            nextMessage.files = message.files.filter(Boolean).map(file => ({
+                                name: file?.name || 'arquivo',
+                                mimeType: file?.mimeType || file?.type || '',
+                                path: file?.path || '',
+                                downloadUrl: file?.downloadUrl || ''
+                            }));
+                        }
+
+                        return nextMessage;
+                    });
+
+                    compacted[id] = { ...conversation, msgs };
+                }
+                return compacted;
+            }
+
+            function reduceConversationsForStorage(source, maxConversations = 15, maxMessagesPerConversation = 60) {
+                const compacted = compactConversationsForStorage(source);
+                const ordered = Object.entries(compacted)
+                    .sort(([, a], [, b]) => conversationTs(b) - conversationTs(a))
+                    .slice(0, maxConversations);
+                const reduced = {};
+                for (const [id, conversation] of ordered) {
+                    const msgs = conversationMessages(conversation);
+                    reduced[id] = {
+                        ...conversation,
+                        msgs: msgs.length > maxMessagesPerConversation
+                            ? msgs.slice(-maxMessagesPerConversation)
+                            : msgs
+                    };
+                }
+                return reduced;
+            }
+
+            function saveConvs() {
+                const compacted = compactConversationsForStorage(convs);
+                const saved = setStorageItem('gc_convs', JSON.stringify(compacted), {
+                    silent: true,
+                    onQuota: () => setStorageItem('gc_convs', JSON.stringify(reduceConversationsForStorage(convs)), { silent: true })
+                });
+                if (!saved) {
+                    toast('⚠ Armazenamento local cheio. O navegador reduziu o histórico salvo.');
+                }
+            }
+            function newConversation() {
+                // Prevent creating multiple empty conversations
+                if (activeId && conversationMessages(convs[activeId]).length === 0) {
+                    toast('💬 Já existe uma conversa vazia. Comece a digitar!');
+                    document.getElementById('msg').focus();
+                    closeSidebar();
+                    return;
+                }
+                const id = 'c' + Date.now();
+                convs[id] = { uid: newConversationUid(), title: 'Nova Conversa', msgs: [], ts: Date.now() };
+                saveConvs(); setActive(id);
+            }
+            function setActive(id) { activeId = id; renderSidebar(); renderChat(); if (window.innerWidth <= 768) closeSidebar(); }
+            function delConv(id, e) {
+                e.stopPropagation();
+                delete convs[id]; saveConvs();
+                if (activeId === id) activeId = null;
+                renderSidebar(); renderChat();
+            }
+            function clearAll() {
+                if (!confirm('Tem certeza que deseja apagar todas as conversas? Esta ação não pode ser desfeita.')) return;
+                convs = {}; activeId = null; saveConvs(); renderSidebar(); renderChat();
+            }
+
+            function renderSidebar() {
+                const list = document.getElementById('conv-list');
+                const q = document.getElementById('search-box').value.toLowerCase();
+                const ids = Object.keys(convs)
+                    .filter(id => conversationTitle(convs[id]).toLowerCase().includes(q))
+                    .sort((a, b) => conversationTs(convs[b]) - conversationTs(convs[a]));
+
+                if (ids.length === 0) {
+                    list.innerHTML = `<div style="text-align:center; padding: 20px 10px; color:var(--muted); font-size: 13px;">Nenhuma conversa encontrada.</div>`;
+                    return;
+                }
+
+                list.innerHTML = ids.map(id => `
+    <div class="ci ${id === activeId ? 'active' : ''}" data-cid="${id}" onclick="setActive('${id}')" ondblclick="event.stopPropagation();renameConv('${id}')">
+      <span class="ci-title">${esc(conversationTitle(convs[id]))}</span>
+      <button class="ci-del" onclick="delConv('${id}',event)" title="Deletar">✕</button>
+    </div>`).join('');
+            }
+
+            // ─ RENDER CHAT (lazy rendering — Estratégia A) ─
+            const CHAT_PAGE_SIZE = 25;
+            let chatRenderedFrom = 0;     // index of the oldest rendered message
+            let chatRenderedCount = 0;     // how many messages are currently rendered
+            let chatScrollObserver = null; // IntersectionObserver for loading older msgs
+            const msgHTMLCache = new Map(); // key: convId+msgIndex+msgTs → HTML string
+
+            function msgCacheKey(convId, idx, msg) {
+                return `${convId}:${idx}:${msg.ts || 0}:${(msg.text || '').length}:${Array.isArray(msg.trace) ? msg.trace.length : 0}:${Array.isArray(msg.files) ? msg.files.length : 0}`;
+            }
+
+            function cachedMsgHTML(convId, msg, idx) {
+                const key = msgCacheKey(convId, idx, msg);
+                if (msgHTMLCache.has(key)) return msgHTMLCache.get(key);
+                const html = msgHTML(msg, idx);
+                msgHTMLCache.set(key, html);
+                // Keep cache bounded
+                if (msgHTMLCache.size > 500) {
+                    const first = msgHTMLCache.keys().next().value;
+                    msgHTMLCache.delete(first);
+                }
+                return html;
+            }
+
+            function renderChat() {
+                const c = document.getElementById('chat');
+                const messages = activeId ? conversationMessages(convs[activeId]) : [];
+                if (!activeId || !messages.length) {
+                    c.innerHTML = `<div id="empty">
+      <div class="logo">✦</div>
+      <h3>SkillFlow Chat OS</h3>
+      <p>Chat real com LLM, STT, TTS, skills, plugins e function calling. Configure a API Key, escolha o modelo e trabalhe por conversa, projeto ou skill pack.</p>
+      <div class="empty-features">
+        <span>Function Calling</span>
+        <span>Skills por projeto</span>
+        <span>TTS + Live Voice</span>
+        <span>Logs e approvals</span>
+      </div>
+    </div>`;
+                    chatRenderedFrom = 0;
+                    chatRenderedCount = 0;
+                    cleanupChatObserver();
+                    return;
+                }
+
+                // Render only last CHAT_PAGE_SIZE messages initially
+                const total = messages.length;
+                const from = Math.max(0, total - CHAT_PAGE_SIZE);
+                const slice = messages.slice(from);
+
+                const html = slice.map((m, i) => cachedMsgHTML(activeId, m, from + i)).join('');
+
+                // Add sentinel for loading older messages
+                const hasOlder = from > 0;
+                const sentinel = hasOlder
+                    ? `<div id="chat-load-more" style="text-align:center;padding:12px;color:var(--muted);font-size:12px;cursor:pointer" onclick="loadOlderMessages()">⬆ Carregar mensagens anteriores (${from} restantes)</div>`
+                    : '';
+
+                c.innerHTML = sentinel + html;
+                chatRenderedFrom = from;
+                chatRenderedCount = slice.length;
+
+                scrollEnd();
+                updateScrollBottomButton();
+                requestAnimationFrame(() => renderMermaidBlocks());
+
+                // Setup IntersectionObserver for auto-loading older messages
+                setupChatObserver();
+            }
+
+            function loadOlderMessages() {
+                if (!activeId) return;
+                const messages = conversationMessages(convs[activeId]);
+                if (chatRenderedFrom <= 0) return;
+
+                const c = document.getElementById('chat');
+                const prevScrollHeight = c.scrollHeight;
+
+                // Load next batch
+                const newFrom = Math.max(0, chatRenderedFrom - CHAT_PAGE_SIZE);
+                const batchMsgs = messages.slice(newFrom, chatRenderedFrom);
+
+                // Build HTML for the batch
+                const batchHtml = batchMsgs.map((m, i) => cachedMsgHTML(activeId, m, newFrom + i)).join('');
+
+                // Update sentinel
+                const hasOlder = newFrom > 0;
+                const sentinel = hasOlder
+                    ? `<div id="chat-load-more" style="text-align:center;padding:12px;color:var(--muted);font-size:12px;cursor:pointer" onclick="loadOlderMessages()">⬆ Carregar mensagens anteriores (${newFrom} restantes)</div>`
+                    : '';
+
+                // Remove old sentinel and prepend new batch
+                const oldSentinel = document.getElementById('chat-load-more');
+                if (oldSentinel) oldSentinel.remove();
+
+                c.insertAdjacentHTML('afterbegin', sentinel + batchHtml);
+
+                chatRenderedFrom = newFrom;
+                chatRenderedCount += batchMsgs.length;
+
+                // Maintain scroll position
+                requestAnimationFrame(() => {
+                    const newScrollHeight = c.scrollHeight;
+                    c.scrollTop += (newScrollHeight - prevScrollHeight);
+                    updateScrollBottomButton();
+                    renderMermaidBlocks();
+                });
+
+                // Re-setup observer on new sentinel
+                setupChatObserver();
+            }
+
+            function setupChatObserver() {
+                cleanupChatObserver();
+                const sentinel = document.getElementById('chat-load-more');
+                if (!sentinel) return;
+
+                chatScrollObserver = new IntersectionObserver((entries) => {
+                    if (entries[0]?.isIntersecting) {
+                        loadOlderMessages();
+                    }
+                }, { root: document.getElementById('chat'), rootMargin: '200px 0px 0px 0px' });
+
+                chatScrollObserver.observe(sentinel);
+            }
+
+            function cleanupChatObserver() {
+                if (chatScrollObserver) {
+                    chatScrollObserver.disconnect();
+                    chatScrollObserver = null;
+                }
+            }
+
+            // ─ FILE HANDLING ─
+            let pendingFiles = []; // non-image files
+            function handleFiles(e) {
+                const files = e.target.files;
+                if (!files.length) return;
+
+                for (let file of files) {
+                    if (file.size > 20 * 1024 * 1024) {
+                        toast(`⚠ ${file.name} é maior que 20MB.`);
+                        continue;
+                    }
+                    const isImage = file.type.startsWith('image/');
+                        const reader = new FileReader();
+                        reader.onload = (evt) => {
+                            const base64 = evt.target.result.split(',')[1];
+                            if (isImage) {
+                                pendingImages.push({ name: file.name, mimeType: file.type, data: base64, url: evt.target.result });
+                            } else {
+                                pendingFiles.push({ mimeType: file.type, data: base64, name: file.name, url: evt.target.result });
+                            }
+                            renderImagePreview();
+                        };
+                    reader.readAsDataURL(file);
+                }
+                e.target.value = '';
+            }
+            function renderImagePreview() {
+                const c = document.getElementById('img-preview-container');
+                if (!pendingImages.length && !pendingFiles.length) { c.style.display = 'none'; return; }
+                c.style.display = 'flex';
+                let html = pendingImages.map((img, i) => `
+    <div class="img-preview">
+      <img src="${img.url}">
+      <button class="rm-btn" onclick="removeImage(${i})">✕</button>
+    </div>
+  `).join('');
+                html += pendingFiles.map((f, i) => `
+    <div class="file-preview">
+      <span class="file-icon">${f.mimeType === 'application/pdf' ? '📄' : '📝'}</span>
+      <span>${esc(f.name)}</span>
+      <button class="rm-btn" onclick="removeFile(${i})">✕</button>
+    </div>
+  `).join('');
+                c.innerHTML = html;
+            }
+            function removeImage(i) {
+                pendingImages.splice(i, 1);
+                renderImagePreview();
+            }
+            function removeFile(i) {
+                pendingFiles.splice(i, 1);
+                renderImagePreview();
+            }
+
+            function sanitizeUploadName(name, fallback = 'arquivo') {
+                const cleaned = String(name || fallback)
+                    .replace(/[\\/:*?"<>|]+/g, '_')
+                    .replace(/\s+/g, '-')
+                    .replace(/-+/g, '-')
+                    .replace(/^-+|-+$/g, '')
+                    .slice(0, 120);
+                return cleaned || fallback;
+            }
+
+            async function persistPendingAttachments(items, folder) {
+                const now = new Date();
+                const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+                const persisted = [];
+
+                for (let index = 0; index < items.length; index += 1) {
+                    const item = items[index];
+                    if (!item?.data) {
+                        persisted.push(item);
+                        continue;
+                    }
+
+                    const prefix = `${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+                    const fileName = sanitizeUploadName(item.name || `${folder}-${prefix}`);
+                    const path = `.uploads/${stamp}/${folder}/${prefix}-${fileName}`;
+                    const res = await fetch('/api/fs/write', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            path,
+                            content: item.data,
+                            encoding: 'base64',
+                            create_dirs: true
+                        })
+                    });
+
+                    let data = null;
+                    try { data = await res.json(); } catch (_) { }
+                    if (!res.ok || !data?.ok) {
+                        throw new Error(data?.error || `Falha ao salvar ${fileName}`);
+                    }
+
+                    persisted.push({
+                        name: item.name || fileName,
+                        mimeType: item.mimeType || '',
+                        path: data.path,
+                        downloadUrl: '/api/fs/download?path=' + encodeURIComponent(data.path),
+                        data: item.data
+                    });
+                }
+
+                return persisted;
+            }
+
+            function renderMessageFile(file, role) {
+                const href = buildMessageFileDownloadUrl(file);
+                const action = href
+                    ? `<a class="cp" href="${href}" download onclick="event.stopPropagation()">Baixar</a>`
+                    : '';
+                const subtitle = file?.path
+                    ? `<span style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(file.path)}</span>`
+                    : '';
+
+                return `<div class="file-preview">
+      <span class="file-icon">${fileIconForMessage(file)}</span>
+      <span style="display:flex;flex-direction:column;min-width:0;flex:1">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(file?.name || 'arquivo')}</span>
+        ${subtitle}
+      </span>
+      ${action}
+    </div>`;
+            }
+
+            function isRenderableImageFile(file) {
+                const mimeType = String(file?.mimeType || file?.type || '').toLowerCase();
+                const name = String(file?.name || file?.path || '').toLowerCase();
+                return mimeType.startsWith('image/')
+                    || /\.(png|jpe?g|webp|gif|svg)$/.test(name);
+            }
+
+            function renderInlineMessageImage(file) {
+                const src = file?.data
+                    ? `data:${file.mimeType};base64,${file.data}`
+                    : buildMessageFileDownloadUrl(file);
+                if (!src) return renderMessageFile(file);
+                return `<img src="${src}" alt="${esc(file?.name || 'Imagem gerada')}" loading="lazy">`;
+            }
+
+            function msgHTML(m, i) {
+                const t = new Date(m.ts).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+                let body = '';
+                const allFiles = Array.isArray(m.files) ? m.files : [];
+                const imageFiles = allFiles.filter(isRenderableImageFile);
+                const regularFiles = allFiles.filter(file => !isRenderableImageFile(file));
+                const traceHtml = m.role === 'model' ? renderMessageTrace(m.trace) : '';
+                if (Array.isArray(m.files)) m.files = regularFiles;
+
+                if (m.imgs && m.imgs.length > 0) {
+                    body += `<div class="attached-imgs">${m.imgs.map(img => {
+                        const src = img?.data
+                            ? `data:${img.mimeType};base64,${img.data}`
+                            : (img?.downloadUrl || (img?.path ? '/api/fs/download?path=' + encodeURIComponent(img.path) : ''));
+                        return src
+                            ? `<img src="${src}">`
+                            : `<div class="file-preview"><span class="file-icon">🖼️</span><span>${esc(img?.name || 'Imagem anexada')}</span></div>`;
+                    }).join('')}</div>`;
+                }
+                if (imageFiles.length > 0) {
+                    body += `<div class="attached-imgs">${imageFiles.map(renderInlineMessageImage).join('')}</div>`;
+                }
+                if (false) {
+                    body += `<div class="attached-imgs">${m.files.map(f => `<div class="file-preview"><span class="file-icon">${f.type === 'application/pdf' ? '📄' : '📝'}</span><span>${esc(f.name)}</span></div>`).join('')}</div>`;
+                }
+                if (m.files && m.files.length > 0) {
+                    body += `<div class="attached-imgs">${m.files.map(f => renderMessageFile(f, m.role)).join('')}</div>`;
+                }
+
+                if (m.role === 'model') {
+                    body += renderMarkdown(m.text || '');
+                    body += traceHtml;
+                } else {
+                    body += `<p>${esc(m.text || '').replace(/\n/g, '<br>')}</p>`;
+                }
+
+                const userActions = m.role === 'user' ? `
+                    <div class="msg-actions">
+                        <button class="msg-act-btn" onclick="editMsg(${i})" title="Editar">✏ Editar</button>
+                        <button class="msg-act-btn danger" onclick="deleteMsg(${i})" title="Deletar">🗑</button>
+                    </div>` : '';
+
+                const modelActions = m.role === 'model' ? `
+                    <div class="msg-actions">
+                        <button class="msg-act-btn" onclick="regenerateMsg(${i})" title="Regenerar resposta">🔄 Regenerar</button>
+                        <button class="msg-act-btn danger" onclick="deleteMsg(${i})" title="Deletar">🗑</button>
+                    </div>` : '';
+
+                return `<div class="row ${m.role} animate-in">
+    <div class="av">${m.role === 'user' ? '👤' : '✦'}</div>
+    <div style="flex:1; max-width: calc(100% - 42px);">
+      <div class="bub" id="bub${i}">${body}</div>
+      <div class="meta" id="mt${i}">
+        <span>${t}</span>
+        ${m.model ? `<span style="color:var(--accent2)">${m.model}</span>` : ''}
+        ${m.think ? `<span class="tbadge">thinking:${m.think}</span>` : ''}
+        ${m.live ? `<span style="background:#ff4757;color:#fff;font-size:9px;padding:1px 5px;border-radius:3px;font-weight:700">LIVE</span>` : ''}
+        ${m.tok ? `<span>${m.tok.toLocaleString()} tok</span>` : ''}
+        <button class="cp" onclick="copyMsg(${i})">⎘ Copiar Tudo</button>
+        ${m.role === 'model' ? `<button class="tts-btn" onclick="ttsSpeakMsg(${i})" id="tts-btn-${i}" title="Ouvir resposta">🔊</button>` : ''}
+      </div>
+      ${m.role === 'user' ? userActions : modelActions}
+    </div>
+  </div>`;
+            }
+
+            function copyMsg(i) {
+                navigator.clipboard.writeText(convs[activeId].msgs[i].text)
+                    .then(() => toast('✓ Mensagem copiada!'));
+            }
+
+            // ─ EDIT MESSAGE ─
+            function editMsg(i) {
+                const m = convs[activeId]?.msgs[i];
+                if (!m || m.role !== 'user') return;
+                const bub = document.getElementById('bub' + i);
+                if (!bub) return;
+                bub.innerHTML = `<textarea class="edit-textarea" id="edit-ta-${i}">${esc(m.text || '')}</textarea>
+                <div class="edit-actions">
+                    <button class="edit-save-btn" onclick="saveEdit(${i})">💾 Salvar e Reenviar</button>
+                    <button class="edit-cancel-btn" onclick="cancelEdit(${i})">Cancelar</button>
+                </div>`;
+                document.getElementById('edit-ta-' + i)?.focus();
+            }
+
+            function saveEdit(i) {
+                const ta = document.getElementById('edit-ta-' + i);
+                if (!ta) return;
+                const newText = ta.value.trim();
+                if (!newText) { toast('⚠ Mensagem vazia.'); return; }
+                // Update message and remove all subsequent messages
+                convs[activeId].msgs[i].text = newText;
+                convs[activeId].msgs[i].ts = Date.now();
+                convs[activeId].msgs = convs[activeId].msgs.slice(0, i + 1);
+                saveConvs();
+                renderChat();
+                // Re-send to get new response
+                send();
+            }
+
+            function cancelEdit(i) {
+                renderChat();
+            }
+
+            // ─ REGENERATE ─
+            function regenerateMsg(i) {
+                const msgs = convs[activeId]?.msgs;
+                if (!msgs || i < 1) return;
+                // Remove model response and all after it
+                convs[activeId].msgs = convs[activeId].msgs.slice(0, i);
+                saveConvs();
+                renderChat();
+                // Re-send
+                send();
+            }
+
+            // ─ DELETE MESSAGE ─
+            function deleteMsg(i) {
+                const msgs = convs[activeId]?.msgs;
+                if (!msgs) return;
+                if (!confirm('Deletar esta mensagem?')) return;
+                // If user msg, also delete the model response after it
+                if (msgs[i].role === 'user' && msgs[i + 1]?.role === 'model') {
+                    convs[activeId].msgs.splice(i, 2);
+                } else {
+                    convs[activeId].msgs.splice(i, 1);
+                }
+                saveConvs();
+                renderChat();
+                renderSidebar();
+            }
+
+            // ─ UTILS ─
+            function esc(s) {
+                return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            }
+            function updateScrollBottomButton() {
+                const c = document.getElementById('chat');
+                const btn = document.getElementById('scroll-bottom-btn');
+                if (!c || !btn) return;
+                const distance = c.scrollHeight - c.scrollTop - c.clientHeight;
+                btn.classList.toggle('show', distance > 220);
+            }
+            function scrollEnd() {
+                requestAnimationFrame(() => {
+                    const c = document.getElementById('chat');
+                    if (!c) return;
+                    c.scrollTop = c.scrollHeight;
+                    updateScrollBottomButton();
+                });
+            }
+            function toast(msg) {
+                const t = document.getElementById('toast'); t.textContent = msg;
+                t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2800);
+            }
+            function autoH(el) {
+                el.style.height = '0';
+                el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+            }
+
+            // ─ SEND ─
+            async function send() {
+                if (!activeId) newConversation();
+                const input = document.getElementById('msg');
+                const text = input.value.trim();
+                if (!text && pendingImages.length === 0 && pendingFiles.length === 0) return;
+
+                const model = document.getElementById('model-sel').value;
+
+                // ═══ Live model: text must go via WebSocket (no REST support) ═══
+                if (isLiveModel(model)) {
+                    const apiKey = document.getElementById('api-in').value.trim();
+                    if (!apiKey) { toast('⚠ Insira sua API Key!'); return; }
+                    if (pendingFiles.length) {
+                        toast('⚠ Gemini 3.1 Live aceita imagem nesse fluxo, mas não arquivo de texto/código/PDF anexado.');
+                        return;
+                    }
+
+                    input.value = ''; autoH(input);
+
+                    let imgsToSave = [...pendingImages];
+                    let filesToSave = [...pendingFiles];
+                    pendingImages = [];
+                    pendingFiles = [];
+                    renderImagePreview();
+
+                    try {
+                        imgsToSave = await persistPendingAttachments(imgsToSave, 'images');
+                        filesToSave = await persistPendingAttachments(filesToSave, 'files');
+                    } catch (error) {
+                        pendingImages = imgsToSave;
+                        pendingFiles = filesToSave;
+                        renderImagePreview();
+                        toast('⚠ Falha ao salvar anexos do usuário: ' + (error.message || 'erro desconhecido'));
+                        return;
+                    }
+
+                    // Flush pending voice transcripts BEFORE adding text (preserves chronological order)
+                    if (geminiLive.active && (geminiLive.pendingTranscript.trim() || geminiLive.pendingUserTranscript.trim())) {
+                        geminiLive.onTurnComplete();
+                    }
+
+                    // Log user text message
+                    const msgData = { role: 'user', text, ts: Date.now(), live: true };
+                    if (imgsToSave.length) msgData.imgs = imgsToSave;
+                    if (filesToSave.length) msgData.files = filesToSave;
+                    convs[activeId].msgs.push(msgData);
+                    if (convs[activeId].msgs.length === 1) {
+                        convs[activeId].title = text
+                            ? text.slice(0, 48) + (text.length > 48 ? '…' : '')
+                            : (imgsToSave.length ? 'Imagem enviada' : filesToSave[0]?.name || 'Arquivo enviado');
+                    }
+                    saveConvs(); renderSidebar(); renderChat();
+
+                    // Auto-connect WebSocket if not active
+                    if (!geminiLive.active) {
+                        try {
+                            liveMode = true;
+                            document.getElementById('live-btn')?.classList.add('on');
+                            await geminiLive.connect(apiKey, model);
+                        } catch (err) {
+                            liveMode = false;
+                            document.getElementById('live-btn')?.classList.remove('on');
+                            toast('❌ Falha ao conectar Live: ' + (err.message || ''));
+                            return;
+                        }
+                    }
+
+                    geminiLive.sendTurn({
+                        text,
+                        images: imgsToSave,
+                        files: []
+                    });
+                    return;
+                }
+
+                const usingCodex = isCodexModel(model);
+                let apiKey = '';
+                let codexAuth = null;
+                try {
+                    if (usingCodex) codexAuth = getCodexAuthPayload();
+                    else apiKey = document.getElementById('api-in').value.trim();
+                } catch (err) {
+                    toast('⚠ ' + err.message);
+                    return;
+                }
+                if (!usingCodex && !apiKey) { toast('⚠ Insira sua API Key!'); return; }
+                if (usingCodex && !codexAuth) { toast('⚠ Cole a credencial do Codex!'); return; }
+
+                input.value = ''; autoH(input);
+
+                let imgsToSave = [...pendingImages];
+                let filesToSave = [...pendingFiles];
+                pendingImages = [];
+                pendingFiles = [];
+                renderImagePreview();
+
+                try {
+                    imgsToSave = await persistPendingAttachments(imgsToSave, 'images');
+                    filesToSave = await persistPendingAttachments(filesToSave, 'files');
+                } catch (error) {
+                    pendingImages = imgsToSave;
+                    pendingFiles = filesToSave;
+                    renderImagePreview();
+                    toast('⚠ Falha ao salvar anexos do usuário: ' + (error.message || 'erro desconhecido'));
+                    return;
+                }
+
+                const msgData = { role: 'user', text, imgs: imgsToSave, ts: Date.now() };
+                if (filesToSave.length) msgData.files = filesToSave;
+                convs[activeId].msgs.push(msgData);
+                if (convs[activeId].msgs.length === 1)
+                    convs[activeId].title = text ? text.slice(0, 48) + (text.length > 48 ? '…' : '') : (imgsToSave.length ? 'Imagem enviada' : filesToSave[0]?.name || 'Arquivo enviado');
+                saveConvs(); renderSidebar();
+
+                const chat = document.getElementById('chat');
+                document.getElementById('empty')?.remove();
+                chat.insertAdjacentHTML('beforeend', msgHTML(convs[activeId].msgs.at(-1), convs[activeId].msgs.length - 1));
+
+                const think = document.getElementById('think-lvl').value;
+                const effectiveThink = usingCodex ? normalizeCodexReasoning(think) : think;
+                const isThinking = (supportsThinking(model) && !!think) || (usingCodex && !!effectiveThink);
+
+                const tid = 't' + Date.now();
+                chat.insertAdjacentHTML('beforeend',
+                    isThinking
+                        ? `<div id="${tid}" class="row model animate-in"><div class="av">✦</div>
+     <div style="flex:1;max-width:calc(100% - 42px)">
+       <div class="thinking-indicator"><span class="brain">🧠</span> Pensando<span class="thinking-dots"><span></span><span></span><span></span></span></div>
+       <div class="skeleton-lines"><div class="skeleton-line" style="width:85%"></div><div class="skeleton-line" style="width:60%"></div><div class="skeleton-line" style="width:72%"></div></div>
+     </div></div>`
+                        : `<div id="${tid}" class="row model animate-in"><div class="av">✦</div>
+     <div class="typing"><span></span><span></span><span></span></div></div>`);
+                scrollEnd();
+
+                const requestId = ++generationSeq;
+                const requestCtrl = new AbortController();
+                generationControllers.set(requestId, requestCtrl);
+                refreshGenerationUi();
+
+                const temp = parseFloat(document.getElementById('temp').value);
+                const topp = parseFloat(document.getElementById('topp').value);
+                const topk = parseInt(document.getElementById('topk').value);
+                const maxt = parseInt(document.getElementById('maxt').value);
+                const sysp = document.getElementById('sysp').value.trim();
+
+                // Only include image data for the last MAX_IMG_TURNS turns that have images.
+                const MAX_IMG_TURNS = 3;
+                const msgList = convs[activeId].msgs;
+                const imgMsgIndices = new Set(
+                    msgList.reduce((acc, m, i) => { if (m.imgs?.length || m.files?.length) acc.push(i); return acc; }, [])
+                        .slice(-MAX_IMG_TURNS)
+                );
+
+                const contents = msgList.map((m, i) => {
+                    const parts = [];
+                    const hasImgs = m.imgs?.length > 0;
+                    const hasFiles = m.files?.length > 0;
+                    const imagePayloads = hasImgs ? m.imgs.filter(img => img?.data) : [];
+                    const filePayloads = hasFiles ? m.files.filter(f => f?.data) : [];
+                    const attachmentRefs = buildAttachmentReferenceText(m.imgs || [], m.files || []);
+
+                    if ((hasImgs || hasFiles) && imgMsgIndices.has(i)) {
+                        if (m.text) parts.push({ text: m.text });
+                        if (attachmentRefs) parts.push({ text: attachmentRefs });
+                        if (imagePayloads.length) imagePayloads.forEach(img => {
+                            parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
+                        });
+                        if (filePayloads.length) filePayloads.forEach(f => {
+                            parts.push({ inlineData: { mimeType: f.mimeType, data: f.data } });
+                        });
+                        if (!imagePayloads.length && !filePayloads.length) {
+                            const count = (m.imgs?.length || 0) + (m.files?.length || 0);
+                            parts.push({ text: `[${count} arquivo(s) salvo(s) no workspace do usuário]` });
+                        }
+                    } else if ((hasImgs || hasFiles) && !imgMsgIndices.has(i)) {
+                        const count = (m.imgs?.length || 0) + (m.files?.length || 0);
+                        const note = `[${count} arquivo(s) enviado(s) — omitido(s) do contexto]`;
+                        parts.push({ text: (m.text ? m.text + '\n' : '') + note + (attachmentRefs ? '\n' + attachmentRefs : '') });
+                    } else {
+                        if (m.text) parts.push({ text: m.text });
+                    }
+
+                    if (m.sig && parts[0]) parts[0].thoughtSignature = m.sig;
+                    return { role: m.role === 'model' ? 'model' : 'user', parts };
+                }).filter(item => Array.isArray(item.parts) && item.parts.length);
+
+                const genCfg = { temperature: temp, topP: topp, topK: topk, maxOutputTokens: maxt };
+                if (supportsThinking(model) && think) genCfg.thinkingConfig = { thinkingLevel: think };
+
+                const MAX_CTX_TURNS = 40;
+                const trimmedContents = contents.length > MAX_CTX_TURNS
+                    ? contents.slice(-MAX_CTX_TURNS)
+                    : contents;
+
+                const body = { contents: trimmedContents, generationConfig: genCfg, tools: buildTools() };
+                const hasTools = body.tools?.length > 0 || body.tools?.[0]?.functionDeclarations?.length > 0;
+                const skillsInstruction = hasTools
+                    ? '\n\n[REGRA OPERACIONAL] Você tem ferramentas (skills) disponíveis. SEMPRE verifique se alguma skill resolve a pergunta ANTES de responder com texto. Use function calling em vez de verbalizar ações. Só responda verbalmente se nenhuma skill for adequada.'
+                    : '';
+                const fullSysp = (sysp || '') + skillsInstruction;
+                if (fullSysp.trim()) body.systemInstruction = { parts: [{ text: fullSysp }] };
+
+                const thinkTimeout = isThinking ? 180000 : 60000;
+                const autoAbort = setTimeout(() => {
+                    if (generationControllers.has(requestId)) requestCtrl.abort();
+                }, thinkTimeout);
+                let mi = null;
+                try {
+
+                    async function callAPI(reqBody, bubEl, depth) {
+                        depth = depth || 0;
+                        const r = await fetch(
+                            `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`,
+                            {
+                                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(reqBody), signal: requestCtrl.signal
+                            }
+                        );
+                        if (!r.ok) {
+                            let em = `HTTP ${r.status}`;
+                            try { const e = await r.json(); em = e.error?.message || em; } catch (_) { }
+                            // Specific error messages
+                            if (r.status === 429) em = '⏱ Rate limit excedido. Aguarde alguns segundos e tente novamente.';
+                            else if (r.status === 403) em = '🔑 API Key inválida ou sem permissão para este modelo.';
+                            else if (r.status === 400) em = '⚠ Requisição inválida: ' + em;
+                            throw new Error(em);
+                        }
+
+                        // fnCallParts: array of parts {functionCall, thoughtSignature?} preserved exactly from API
+                        // textSig: thoughtSignature from text/thought parts (non-FC) — optional to send back
+                        let full = '', tok = 0, textSig = '', fnCallParts = [];
+                        const reader = r.body.getReader(), dec = new TextDecoder();
+                        let buf = '';
+
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) break;
+                            buf += dec.decode(value, { stream: true });
+                            const evtLines = buf.split('\n'); buf = evtLines.pop();
+                            for (const ln of evtLines) {
+                                if (!ln.startsWith('data: ')) continue;
+                                const raw = ln.slice(6).trim();
+                                if (raw === '[DONE]') continue;
+                                try {
+                                    const j = JSON.parse(raw);
+                                    for (const p of (j.candidates?.[0]?.content?.parts || [])) {
+                                        if (p.text) { full += p.text; }
+                                        // thoughtSignature on text/thought parts (non-FC) — optional, stored for next turn
+                                        if (p.thoughtSignature && !p.functionCall) textSig = p.thoughtSignature;
+                                        // Preserve each functionCall part EXACTLY as received (with its thoughtSignature)
+                                        // Gemini 3 REQUIRES thoughtSignature ON the functionCall part itself — mandatory 400 otherwise
+                                        if (p.functionCall) fnCallParts.push({ ...p });
+                                    }
+                                    if (j.usageMetadata?.totalTokenCount) tok = j.usageMetadata.totalTokenCount;
+                                    if (full && !fnCallParts.length) { bubEl.innerHTML = renderMarkdown(full); scrollEnd(); }
+                                } catch (e) { console.error('Stream parse:', e); }
+                            }
+                        }
+
+                        // ─ FUNCTION CALL(S): execute and re-request ─
+                        // Supports: parallel FCs, sequential multi-step, single FC — all Gemini 3 compliant
+                        if (fnCallParts.length && depth < 6) {
+                            fnCallParts.forEach(part => {
+                                pushToolCallTrace(currentModelMsg, {
+                                    name: part?.functionCall?.name,
+                                    arguments: part?.functionCall?.args || {}
+                                });
+                            });
+                            // Build visual indicator for all function calls
+                            const callLabels = fnCallParts.map(p => {
+                                const args = p.functionCall.args || {};
+                                const argStr = Object.entries(args).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ');
+                                return `<code style="background:var(--s2);padding:2px 6px;border-radius:4px">${p.functionCall.name}(${argStr})</code>`;
+                            }).join(' <span style="color:var(--muted)">+</span> ');
+                            bubEl.innerHTML = `<div style="color:var(--accent2);font-size:13px;display:flex;align-items:center;gap:8px;padding:4px 0;flex-wrap:wrap">
+          <span style="display:inline-block;animation:bop 1s infinite">🔍</span>
+          <span>Chamando ${callLabels} …</span>
+        </div>`;
+                            scrollEnd();
+
+                            // Execute all function calls in parallel
+                            const results = await Promise.all(
+                                fnCallParts.map(p => executePlugin(p.functionCall.name, p.functionCall.args || {}))
+                            );
+                            results.forEach((result, index) => {
+                                pushToolResultTrace(currentModelMsg, fnCallParts[index]?.functionCall?.name, result);
+                            });
+                            const currentFiles = results.flatMap(result => extractToolArtifacts(result));
+
+                            // Model parts: send EXACTLY as received from API (thoughtSignature preserved per part)
+                            // CRITICAL for Gemini 3: thoughtSignature MUST stay on the functionCall part, NOT separate
+                            const modelParts = fnCallParts;
+
+                            // All functionResponses in ONE user message (parallel FC requires no interleaving)
+                            const frParts = fnCallParts.map((p, i) => ({
+                                functionResponse: { name: p.functionCall.name, response: results[i] }
+                            }));
+
+                            const updatedContents = [
+                                ...reqBody.contents,
+                                { role: 'model', parts: modelParts },
+                                { role: 'user', parts: frParts }
+                            ];
+                            const nested = await callAPI({ ...reqBody, contents: updatedContents }, bubEl, depth + 1);
+                            return {
+                                ...nested,
+                                files: mergeMessageFiles(currentFiles, nested?.files || [])
+                            };
+                        }
+
+                        return { full, tok, sig: textSig, files: [] };
+                    }
+
+                    document.getElementById(tid)?.remove();
+                    mi = convs[activeId].msgs.length;
+                    convs[activeId].msgs.push({
+                        role: 'model', text: '', ts: Date.now(), model,
+                        think: isThinking ? effectiveThink : undefined,
+                        trace: isThinking
+                            ? [createTraceStep('thinking', { title: 'Thinking', meta: `level=${effectiveThink}` })]
+                            : []
+                    });
+                    const currentModelMsg = convs[activeId].msgs[mi];
+
+                    chat.insertAdjacentHTML('beforeend', `
+      <div id="mm${mi}" class="row model">
+        <div class="av">✦</div>
+        <div style="flex:1; max-width: calc(100% - 42px);">
+          <div class="bub" id="bb${mi}"></div>
+          <div class="meta" id="mt${mi}">
+            <span>${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>
+            <span style="color:var(--accent2)">${model}</span>
+            ${isThinking ? `<span class="tbadge">thinking:${effectiveThink}</span>` : ''}
+          </div>
+        </div>
+      </div>`);
+
+                    const bub = document.getElementById(`bb${mi}`);
+                    let full = '';
+                    let tok = 0;
+                    let sig = '';
+                    let modelFiles = [];
+                    const codexTools = usingCodex ? buildCodexTools() : [];
+
+                    async function callCodexAPI(inputItems, depth) {
+                        const result = await requestCodexChat({
+                            auth: codexAuth,
+                            model,
+                            reasoning: effectiveThink,
+                            instructions: sysp,
+                            input: inputItems,
+                            tools: codexTools,
+                            signal: requestCtrl.signal
+                        });
+
+                        const payload = result?.payload || {};
+                        const toolCalls = Array.isArray(payload.tool_calls) ? payload.tool_calls : [];
+                        const outputItems = Array.isArray(payload.output_items) ? payload.output_items : [];
+
+                        if (toolCalls.length) {
+                            if (depth >= 6) throw new Error('Limite de function calls atingido para o Codex.');
+                            toolCalls.forEach(call => pushToolCallTrace(currentModelMsg, call));
+
+                            const callLabels = toolCalls.map(call => {
+                                const args = call.arguments || {};
+                                const argStr = Object.entries(args).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ');
+                                return `<code style="background:var(--s2);padding:2px 6px;border-radius:4px">${call.name}(${argStr})</code>`;
+                            }).join(' <span style="color:var(--muted)">+</span> ');
+
+                            bub.innerHTML = `<div style="color:var(--accent2);font-size:13px;display:flex;align-items:center;gap:8px;padding:4px 0;flex-wrap:wrap">
+          <span style="display:inline-block;animation:bop 1s infinite">🔍</span>
+          <span>Chamando ${callLabels} …</span>
+        </div>`;
+                            scrollEnd();
+
+                            const results = await Promise.all(
+                                toolCalls.map(call => executePlugin(call.name, call.arguments || {}))
+                            );
+                            results.forEach((result, index) => {
+                                pushToolResultTrace(currentModelMsg, toolCalls[index]?.name, result);
+                            });
+                            const currentFiles = results.flatMap(result => extractToolArtifacts(result));
+                            const assistantToolItems = outputItems.length
+                                ? outputItems
+                                : toolCalls.map(call => ({
+                                    type: 'function_call',
+                                    id: call.id || call.call_id,
+                                    call_id: call.call_id,
+                                    name: call.name,
+                                    arguments: call.arguments_raw || JSON.stringify(call.arguments || {})
+                                }));
+
+                            const nextInput = [
+                                ...inputItems,
+                                ...assistantToolItems,
+                                ...toolCalls.map((call, index) => ({
+                                    type: 'function_call_output',
+                                    call_id: call.call_id,
+                                    output: stringifyCodexToolOutput(results[index])
+                                }))
+                            ];
+
+                            const nested = await callCodexAPI(nextInput, depth + 1);
+                            return {
+                                ...nested,
+                                files: mergeMessageFiles(currentFiles, nested?.files || [])
+                            };
+                        }
+
+                        return {
+                            full: payload.output_text || '',
+                            tok: codexUsageTotalTokens(payload.usage),
+                            files: []
+                        };
+                    }
+
+                    if (usingCodex) {
+                        const codexResult = await callCodexAPI(buildCodexInputFromMessages(convs[activeId].msgs), 0);
+                        full = codexResult.full || '';
+                        tok = codexResult.tok || 0;
+                        modelFiles = codexResult.files || [];
+                        if (full) {
+                            bub.innerHTML = renderMarkdown(full);
+                            scrollEnd();
+                        }
+                    } else {
+                        ({ full, tok, sig, files: modelFiles } = await callAPI(body, bub));
+                    }
+
+                    // ─ FINALIZE ─
+                    convs[activeId].msgs[mi].text = full || (usingCodex
+                        ? '[Resposta vazia — o Codex não retornou texto.]'
+                        : '[Resposta vazia — o modelo executou ferramentas sem gerar texto.]');
+                    if (!full) {
+                        const bub = document.getElementById(`bb${mi}`);
+                        if (bub) {
+                            bub.innerHTML = usingCodex
+                                ? `<p style="color:var(--muted);font-style:italic">O Codex respondeu sem texto visível.</p>`
+                                : `<p style="color:var(--muted);font-style:italic">O modelo executou ferramentas mas não gerou texto de resposta.</p>`;
+                        }
+                    }
+                    const deliveredFiles = Array.isArray(modelFiles) ? modelFiles.length : 0;
+                    if (!full && deliveredFiles) {
+                        convs[activeId].msgs[mi].text = `[Arquivo${deliveredFiles > 1 ? 's' : ''} entregue${deliveredFiles > 1 ? 's' : ''} — veja ${deliveredFiles > 1 ? 'os anexos abaixo' : 'o anexo abaixo'}.]`;
+                        const artifactBubble = document.getElementById(`bb${mi}`);
+                        if (artifactBubble) {
+                            artifactBubble.innerHTML = `<p style="color:var(--muted);font-style:italic">${deliveredFiles > 1 ? `${deliveredFiles} arquivos foram gerados` : 'Arquivo gerado'} e anexado${deliveredFiles > 1 ? 's' : ''} na conversa.</p>`;
+                        }
+                    }
+                    if (tok) convs[activeId].msgs[mi].tok = tok;
+                    if (sig) convs[activeId].msgs[mi].sig = sig;
+                    if (Array.isArray(modelFiles) && modelFiles.length) convs[activeId].msgs[mi].files = modelFiles;
+                    pushMessageTrace(currentModelMsg, createTraceStep('final', {
+                        title: 'Resposta final',
+                        meta: [
+                            tok ? `${tok.toLocaleString()} tok` : '',
+                            deliveredFiles ? `${deliveredFiles} arquivo${deliveredFiles > 1 ? 's' : ''}` : ''
+                        ].filter(Boolean).join(' • '),
+                        body: full
+                            ? trimTraceText(full, 420)
+                            : (deliveredFiles
+                                ? `Resposta sem texto, mas com ${deliveredFiles} arquivo${deliveredFiles > 1 ? 's' : ''} entregue${deliveredFiles > 1 ? 's' : ''}.`
+                                : 'Resposta sem texto visivel.')
+                    }));
+
+                    const mt = document.getElementById(`mt${mi}`);
+                    if (mt) {
+                        if (tok) mt.insertAdjacentHTML('beforeend', `<span>${tok.toLocaleString()} tok</span>`);
+                        mt.insertAdjacentHTML('beforeend', `<button class="cp" onclick="copyMsg(${mi})">⎘ Copiar Tudo</button>`);
+                        mt.insertAdjacentHTML('beforeend', `<button class="tts-btn" onclick="ttsSpeakMsg(${mi})" id="tts-btn-${mi}" title="Ouvir resposta">🔊</button>`);
+                        // Auto-play TTS if enabled
+                        if (document.getElementById('tts-autoplay')?.checked && !liveMode) ttsSpeakMsg(mi);
+                    }
+                    saveConvs();
+                    renderChat();
+
+                } catch (err) {
+                    document.getElementById(tid)?.remove();
+                    if (err.name === 'AbortError') {
+                        toast('⏹ Geração interrompida.');
+                        if (mi !== null) {
+                            const abortedMsg = convs[activeId]?.msgs?.[mi];
+                            if (abortedMsg?.role === 'model' && !abortedMsg.text) convs[activeId].msgs.splice(mi, 1);
+                        }
+                    } else {
+                        const friendlyMsg = err.message?.includes('Failed to fetch')
+                            ? '🌐 Sem conexão ou o servidor demorou demais. Tente de novo.'
+                            : err.message?.includes('timeout') || err.message?.includes('aborted')
+                            ? '⏱ O modelo demorou para responder. Tente novamente ou reduza o Thinking Level.'
+                            : err.message;
+                        chat.insertAdjacentHTML('beforeend', `
+        <div class="row model">
+          <div class="av" style="background:#4a0000; color: #fff;">⚠</div>
+          <div class="bub" style="border-color:var(--danger);color:var(--danger);display:flex;flex-direction:column;gap:8px">
+            <span>${esc(friendlyMsg)}</span>
+            <button class="retry-btn" onclick="send()">🔄 Tentar novamente</button>
+          </div>
+        </div>`);
+                        toast('❌ ' + friendlyMsg.slice(0, 70));
+                    }
+                    saveConvs();
+                } finally {
+                    clearTimeout(autoAbort);
+                    generationControllers.delete(requestId);
+                    refreshGenerationUi();
+                    renderSidebar(); scrollEnd();
+                }
+            }
+
+            function stop() {
+                generationControllers.forEach(controller => {
+                    try { controller.abort(); } catch (_) { }
+                });
+            }
+
+            // ─ EVENTOS ─
+            document.getElementById('msg').addEventListener('keydown', e => {
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+            });
+            document.getElementById('msg').addEventListener('input', function () { autoH(this); });
+            window.addEventListener('DOMContentLoaded', () => {
+                const chat = document.getElementById('chat');
+                if (!chat) return;
+                chat.addEventListener('scroll', updateScrollBottomButton, { passive: true });
+                updateScrollBottomButton();
+            });
+
+            // ─ PASTE IMAGE (Ctrl+V) ─
+            document.addEventListener('paste', e => {
+                const items = e.clipboardData?.items;
+                if (!items) return;
+                let foundImage = false;
+                for (const item of items) {
+                    if (item.type.startsWith('image/')) {
+                        foundImage = true;
+                        const file = item.getAsFile();
+                        if (!file) continue;
+                        if (file.size > 5 * 1024 * 1024) { toast('⚠ Imagem maior que 5MB.'); continue; }
+                        const reader = new FileReader();
+                        reader.onload = evt => {
+                            const base64 = evt.target.result.split(',')[1];
+                            pendingImages.push({ name: file.name || 'imagem-colada.png', mimeType: file.type, data: base64, url: evt.target.result });
+                            renderImagePreview();
+                            toast('📋 Imagem colada!');
+                            document.getElementById('msg').focus();
+                        };
+                        reader.readAsDataURL(file);
+                    }
+                }
+                // Don't prevent default for text paste
+                if (foundImage) e.preventDefault();
+            });
+
+            // ─ INIT ─
+            function checkSTTCapability() {
+                const hasSpeechAPI = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+                const isSecure = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+                const issues = [];
+                if (!hasSpeechAPI) issues.push('Browser não suporta STT (use Chrome/Edge)');
+                if (!isSecure) issues.push('HTTPS necessário para microfone');
+
+                if (issues.length) {
+                    // Disable mic and live buttons visually
+                    const micBtn = document.getElementById('mic-btn');
+                    const liveBtn = document.getElementById('live-btn');
+                    if (micBtn) { micBtn.style.opacity = '0.4'; micBtn.title = issues.join(', '); }
+                    if (liveBtn) { liveBtn.style.opacity = '0.4'; liveBtn.title = issues.join(', '); }
+                    console.warn('[SkillFlow] STT indisponível:', issues.join('; '));
+                }
+                return issues;
+            }
+
+            async function initApp() {
+                try {
+                    if (window.__ACCOUNT_BOOTSTRAP__) {
+                        const authState = await window.__ACCOUNT_BOOTSTRAP__;
+                        if (authState?.redirected) return;
+                    }
+                } catch (error) {
+                    console.warn('Falha ao carregar conta:', error?.message || error);
+                }
+
+                convs = JSON.parse(localStorage.getItem('gc_convs') || '{}');
+                if (normalizeStoredConversations()) saveConvs();
+                if (!activeId || !convs[activeId]) {
+                    activeId = Object.keys(convs)
+                        .sort((a, b) => (convs[b]?.ts || 0) - (convs[a]?.ts || 0))[0] || null;
+                }
+
+                loadCfg();
+                await loadPlugins();
+                initMermaid();
+                renderSidebar();
+                renderChat();
+                // Restore sidebar collapsed state on desktop
+                if (window.innerWidth > 768 && localStorage.getItem('gc_sb_collapsed') === '1') {
+                    document.getElementById('sidebar').classList.add('collapsed');
+                    document.body.classList.add('sb-collapsed');
+                }
+
+                window.__skillflowAccount?.mountShell?.();
+                window.__skillflowAccount?.startSync?.();
+
+                // Proactive STT capability check
+                checkSTTCapability();
+            }
+
+            initApp();
+
+            // ─══════════════════════════════════════════════════
+            // SPEECH TO TEXT — Web Speech API (PT-BR, tempo real)
+            // ─══════════════════════════════════════════════════
+            let recognition = null;
+            let isListening = false;
+            let speechBase = '';
+            let micStream = null;
+            let micPermissionState = localStorage.getItem('gc_mic_permission') || 'unknown';
+            let speechRestartTimer = null;
+            let speechRestartAttempts = 0;
+            let speechNoSpeechCount = 0;
+            let speechLastResultAt = 0;
+
+            function setMicUi(active) {
+                document.getElementById('mic-btn')?.classList.toggle('listening', !!active);
+                document.getElementById('mic-status')?.classList.toggle('on', !!active);
+            }
+
+            function setMicPermissionState(state) {
+                micPermissionState = state;
+                setStorageItem('gc_mic_permission', state, { silent: true });
+            }
+
+            function releaseMicStream() {
+                if (!micStream) return;
+                try {
+                    micStream.getTracks().forEach(track => track.stop());
+                } catch (_) { }
+                micStream = null;
+            }
+
+            async function ensureMicPermission() {
+                if (location.protocol === 'file:') {
+                    toast('Nao foi possivel ativar o microfone agora. Recarregue a pagina e tente novamente.');
+                    return false;
+                }
+                try {
+                    if (navigator.permissions?.query) {
+                        const status = await navigator.permissions.query({ name: 'microphone' });
+                        if (status.state === 'denied') {
+                            setMicPermissionState('denied');
+                            toast('⚠ Microfone bloqueado no navegador.');
+                            return false;
+                        }
+                        if (status.state === 'granted') {
+                            setMicPermissionState('granted');
+                        }
+                    }
+                } catch (_) { }
+
+                if (!navigator.mediaDevices?.getUserMedia) {
+                    toast('⚠ Seu navegador não suporta captura de áudio. Use Chrome ou Edge em HTTPS.');
+                    return false;
+                }
+
+                try {
+                    const permissionProbe = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true
+                        }
+                    });
+                    micStream = permissionProbe;
+                    setMicPermissionState('granted');
+                    releaseMicStream();
+                    return true;
+                } catch (e) {
+                    if (e?.name === 'NotAllowedError' || e?.name === 'SecurityError') {
+                        setMicPermissionState('denied');
+                        toast('⚠ Permissao de microfone negada.');
+                    } else {
+                        toast('⚠ Nao foi possivel preparar o microfone: ' + e.message);
+                    }
+                    return false;
+                }
+            }
+
+            function setMicStreamEnabled(enabled) {
+                if (!micStream) return;
+                micStream.getAudioTracks().forEach(track => {
+                    track.enabled = !!enabled;
+                });
+            }
+
+            function initSpeech() {
+                if (recognition) return recognition;
+                const SpeechAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
+                if (!SpeechAPI) return null;
+                recognition = new SpeechAPI();
+                recognition.lang = 'pt-BR';
+                recognition.interimResults = true;
+                recognition.continuous = true;
+                recognition.maxAlternatives = 1;
+
+                recognition.onstart = () => {
+                    isListening = true;
+                    speechRestartAttempts = 0;
+                    setMicUi(true);
+                };
+
+                recognition.onresult = (e) => {
+                    const msg = document.getElementById('msg');
+                    let interim = '';
+                    for (let i = e.resultIndex; i < e.results.length; i++) {
+                        if (e.results[i].isFinal) {
+                            speechBase = geminiLive.mergeTranscriptText(speechBase, e.results[i][0].transcript.trim());
+                        } else {
+                            interim = geminiLive.mergeTranscriptText(interim, e.results[i][0].transcript);
+                        }
+                    }
+
+                    let display = speechBase;
+                    if (interim.trim()) {
+                        display += (display ? ' ' : '') + interim.trim();
+                    }
+                    msg.value = display;
+                    autoH(msg);
+                    speechLastResultAt = Date.now();
+                    speechNoSpeechCount = 0;
+                };
+
+                recognition.onerror = (e) => {
+                    if (e.error === 'not-allowed') {
+                        setMicPermissionState('denied');
+                        toast('⚠ Permissao de microfone negada.');
+                        stopSpeech();
+                        return;
+                    }
+                    if (e.error === 'audio-capture') {
+                        toast('⚠ Nenhum microfone disponivel.');
+                        stopSpeech();
+                        return;
+                    }
+                    if (e.error === 'network') {
+                        toast('⚠ Erro de rede no reconhecimento de voz. Verifique sua conexão.');
+                        stopSpeech();
+                        return;
+                    }
+                    if (e.error === 'service-not-allowed') {
+                        toast('⚠ Serviço de voz indisponível. HTTPS é necessário.');
+                        stopSpeech();
+                        return;
+                    }
+                    if (e.error === 'no-speech') {
+                        speechNoSpeechCount += 1;
+                        return;
+                    }
+                    if (e.error === 'aborted') return; // Ignore user-initiated abort
+                    // Catch-all for unknown errors
+                    console.warn('[STT] Erro não tratado:', e.error, e);
+                    toast('⚠ Erro no reconhecimento de voz: ' + (e.error || 'desconhecido'));
+                    stopSpeech();
+                };
+
+                recognition.onend = () => {
+                    if (!isListening) return;
+                    clearTimeout(speechRestartTimer);
+                    speechRestartTimer = setTimeout(() => {
+                        if (!isListening || !recognition) return;
+                        try {
+                            recognition.start();
+                        } catch (_) {
+                            speechRestartAttempts += 1;
+                            if (speechRestartAttempts < 4) {
+                                clearTimeout(speechRestartTimer);
+                                speechRestartTimer = setTimeout(() => {
+                                    if (!isListening || !recognition) return;
+                                    try {
+                                        recognition.start();
+                                    } catch (_) {
+                                        speechRestartAttempts += 1;
+                                        if (speechRestartAttempts >= 4) {
+                                            stopSpeech();
+                                        }
+                                    }
+                                }, 900);
+                                return;
+                            }
+                            const stale = !speechLastResultAt || (Date.now() - speechLastResultAt > 12000);
+                            if (speechNoSpeechCount >= 2 && stale) {
+                                toast('⚠ O microfone iniciou, mas o navegador não detectou fala. Verifique o dispositivo de entrada.');
+                            }
+                            stopSpeech();
+                        }
+                    }, 700);
+                };
+
+                return recognition;
+            }
+
+            async function toggleSpeech() {
+                if (!window.SpeechRecognition && !window.webkitSpeechRecognition) {
+                    toast('⚠ Seu browser não suporta STT. Use Chrome ou Edge.');
+                    return;
+                }
+                if (liveMode && liveState === 'playing') {
+                    ttsStop();
+                    return;
+                }
+                if (isListening) {
+                    stopSpeech();
+                } else {
+                    await startSpeech();
+                }
+            }
+
+            async function startSpeech() {
+                if (isListening) return;
+                if (!await ensureMicPermission()) return;
+                speechBase = document.getElementById('msg').value.trim();
+                speechRestartAttempts = 0;
+                speechNoSpeechCount = 0;
+                speechLastResultAt = 0;
+                const stt = initSpeech();
+                if (!stt) return;
+                try {
+                    stt.start();
+                } catch (e) {
+                    toast('⚠ Nao foi possivel iniciar o microfone: ' + e.message);
+                }
+            }
+
+            function stopSpeech() {
+                isListening = false;
+                clearTimeout(speechRestartTimer);
+                speechRestartTimer = null;
+                setMicUi(false);
+                if (recognition) {
+                    try { recognition.stop(); } catch (_) { }
+                }
+                speechBase = '';
+                speechRestartAttempts = 0;
+                speechNoSpeechCount = 0;
+            }
+
+            window.addEventListener('beforeunload', () => {
+                if (geminiLive.active) geminiLive.disconnect();
+                releaseMicStream();
+            });
+
+            window.addEventListener('DOMContentLoaded', () => {
+                const msgArea = document.getElementById('msg');
+                msgArea.addEventListener('keydown', e => {
+                    if (e.key === 'Enter' && !e.shiftKey && isListening) stopSpeech();
+                });
+            });
+
+            // ─══════════════════════════════════════════════════════
+            // TTS ENGINE — apitts.ghost1.cloud
+            // ─══════════════════════════════════════════════════════
+            const TTS_API = 'https://apitts.ghost1.cloud';
+            const TTS_KEY = 'abelhadomato';
+            const TTS_FIRST_CHUNK_MAX_CHARS = 120;
+            const TTS_MAX_CHARS_PER_CHUNK = 250;
+            let ttsAudio = null;
+            let ttsPlaying = false;
+            let ttsVoices = [];
+            let ttsMsgIndex = null;
+            let ttsChunkControllers = new Map();
+            let ttsChunkRequests = new Map();
+            let ttsChunkUrls = new Map();
+            let ttsSessionCounter = 0;
+            let ttsActiveSession = 0;
+            let ttsCurrentAudioResolver = null;
+
+            function saveTTSCfg() {
+                const voice = document.getElementById('tts-voice-sel')?.value || '';
+                const autoplay = document.getElementById('tts-autoplay')?.checked || false;
+                setStorageItem('gc_tts_voice', voice, { silent: true });
+                setStorageItem('gc_tts_autoplay', autoplay ? '1' : '0', { silent: true });
+            }
+
+            function loadTTSCfg() {
+                const voice = localStorage.getItem('gc_tts_voice') || '';
+                const autoplay = localStorage.getItem('gc_tts_autoplay') === '1';
+                const sel = document.getElementById('tts-voice-sel');
+                const ap = document.getElementById('tts-autoplay');
+                if (sel && voice) {
+                    // Try to select saved voice; if not in list yet, add it as option
+                    sel.value = voice;
+                    if (sel.value !== voice) {
+                        const o = document.createElement('option');
+                        o.value = voice; o.selected = true;
+                        o.textContent = '✏ ' + voice.split('__').pop().replace(/_/g, ' ');
+                        sel.insertBefore(o, sel.firstChild);
+                    }
+                }
+                if (ap) ap.checked = autoplay;
+            }
+
+            async function ttsLoadVoices() {
+                const sel = document.getElementById('tts-voice-sel');
+                if (!sel) return;
+                try {
+                    sel.innerHTML = '<option value="">Carregando…</option>';
+                    const res = await fetch(TTS_API + '/vozes', {
+                        headers: { 'x-secret': TTS_KEY }
+                    });
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    const raw = await res.text();
+                    console.log('[TTS] /vozes raw response:', raw.slice(0, 300));
+                    let data;
+                    try { data = JSON.parse(raw); } catch (e) { throw new Error('Resposta inválida: ' + raw.slice(0, 80)); }
+
+                    // Inworld format: { voices: [ { name: "workspaces/xxx/voices/voice_id", displayName: "Name" } ] }
+                    // Fallback for plain string arrays or other formats
+                    const rawList = Array.isArray(data) ? data : (data.voices || data.vozes || Object.values(data)[0] || []);
+                    console.log('[TTS] raw voices sample:', JSON.stringify(rawList[0]));
+
+                    ttsVoices = rawList.map(v => {
+                        if (typeof v === 'string') {
+                            // plain voice_id string or full path
+                            const id = v.includes('/') ? v.split('/').pop() : v;
+                            return { id, label: id.split('__').pop().replace(/_/g, ' ') };
+                        }
+                        // Object: Inworld uses "name" as full resource path, "displayName" as label
+                        const rawId = v.voiceId || v.voice_id || v.id || (v.name ? v.name.split('/').pop() : null) || String(v);
+                        const label = v.displayName || v.display_name || v.label || rawId.split('__').pop().replace(/_/g, ' ');
+                        return { id: rawId, label };
+                    }).filter(v => v.id && v.id !== '[object Object]');
+
+                    console.log('[TTS] parsed voices:', ttsVoices.length, ttsVoices[0]);
+
+                    sel.innerHTML = ttsVoices.map(v => {
+                        // Show only clean name: part after __ or displayName
+                        const cleanName = v.id.includes('__') ? v.id.split('__').pop() : v.label;
+                        return `<option value="${esc(v.id)}">${esc(cleanName)}</option>`;
+                    }).join('');
+
+                    loadTTSCfg(); // restore saved selection
+                    toast('✓ ' + ttsVoices.length + ' vozes carregadas!');
+                } catch (e) {
+                    sel.innerHTML = '<option value="">Erro ao carregar vozes</option>';
+                    toast('⚠ TTS: ' + e.message);
+                }
+            }
+
+            function ttsFormatText(rawText) {
+                return String(rawText || '')
+                    .replace(/```[\s\S]*?```/g, ' [bloco de codigo] ')
+                    .replace(/`[^`]+`/g, match => match.slice(1, -1))
+                    .replace(/#{1,6}\s/g, '')
+                    .replace(/\*\*(.*?)\*\*/g, '$1')
+                    .replace(/\*(.*?)\*/g, '$1')
+                    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+                    .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
+                    .replace(/^[\s]*[-*+][\s]/gm, '')
+                    .replace(/\n{2,}/g, '. ')
+                    .replace(/\n/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+            }
+
+            function ttsSplitLongSegment(text, maxChars) {
+                const parts = [];
+                let remaining = String(text || '').trim();
+                while (remaining.length > maxChars) {
+                    let cut = remaining.lastIndexOf(' ', maxChars);
+                    if (cut < Math.floor(maxChars * 0.6)) cut = maxChars;
+                    parts.push(remaining.slice(0, cut).trim());
+                    remaining = remaining.slice(cut).trim();
+                }
+                if (remaining) parts.push(remaining);
+                return parts;
+            }
+
+            function splitTextIntoChunks(text, firstChunkMaxChars = TTS_FIRST_CHUNK_MAX_CHARS, maxCharsPerChunk = TTS_MAX_CHARS_PER_CHUNK) {
+                const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
+                if (!cleaned) return [];
+
+                const rawSentences = cleaned.match(/[^.!?\n;:]+[.!?\n;:]*/g) || [cleaned];
+                const sentences = rawSentences.map(s => s.trim()).filter(Boolean);
+                const chunks = [];
+                let currentChunk = '';
+
+                const flushCurrent = () => {
+                    if (!currentChunk.trim()) return;
+                    chunks.push(currentChunk.trim());
+                    currentChunk = '';
+                };
+
+                for (const sentence of sentences) {
+                    let pending = [sentence];
+                    while (pending.length) {
+                        const segment = pending.shift();
+                        if (!segment) continue;
+                        const maxChars = chunks.length === 0 ? firstChunkMaxChars : maxCharsPerChunk;
+
+                        if (!currentChunk && segment.length > maxChars) {
+                            const pieces = ttsSplitLongSegment(segment, maxChars);
+                            currentChunk = pieces.shift() || '';
+                            flushCurrent();
+                            if (pieces.length) pending = pieces.concat(pending);
+                            continue;
+                        }
+
+                        const candidate = currentChunk ? `${currentChunk} ${segment}` : segment;
+                        if (candidate.length > maxChars && currentChunk) {
+                            flushCurrent();
+                            pending.unshift(segment);
+                            continue;
+                        }
+
+                        currentChunk = candidate;
+                    }
+                }
+
+                flushCurrent();
+                return chunks.length ? chunks : [cleaned];
+            }
+
+            function ttsIsSessionActive(sessionId) {
+                return !!sessionId && ttsPlaying && ttsActiveSession === sessionId;
+            }
+
+            function ttsRevokeChunkUrls() {
+                for (const url of ttsChunkUrls.values()) {
+                    try { URL.revokeObjectURL(url); } catch (_) { }
+                }
+                ttsChunkUrls.clear();
+            }
+
+            function ttsAbortPendingFetches() {
+                for (const controller of ttsChunkControllers.values()) {
+                    try { controller.abort(); } catch (_) { }
+                }
+                ttsChunkControllers.clear();
+                ttsChunkRequests.clear();
+            }
+
+            function ttsSetBarLabel(text, chunkIndex = 0, totalChunks = 1) {
+                const lbl = document.getElementById('tts-bar-label');
+                if (!lbl) return;
+                const prefix = totalChunks > 1 ? `[${chunkIndex + 1}/${totalChunks}] ` : '';
+                lbl.textContent = prefix + text.slice(0, 60) + (text.length > 60 ? '...' : '');
+            }
+
+            function ttsResetUi(idx) {
+                const targetIdx = idx ?? ttsMsgIndex;
+                if (targetIdx !== null) {
+                    const btn = document.getElementById('tts-btn-' + targetIdx);
+                    if (btn) btn.classList.remove('playing');
+                }
+                ttsMsgIndex = null;
+                document.getElementById('tts-bar')?.classList.remove('on');
+                const lbl = document.getElementById('tts-bar-label');
+                if (lbl) lbl.textContent = '';
+            }
+
+            function ttsCleanupPlayback(idx) {
+                const activeAudio = ttsAudio;
+                const resolveAudio = ttsCurrentAudioResolver;
+                ttsCurrentAudioResolver = null;
+                if (activeAudio) {
+                    activeAudio.onended = null;
+                    activeAudio.onerror = null;
+                    try {
+                        activeAudio.pause();
+                        activeAudio.currentTime = 0;
+                    } catch (_) { }
+                }
+                ttsAudio = null;
+                ttsPlaying = false;
+                ttsActiveSession = 0;
+                ttsAbortPendingFetches();
+                ttsRevokeChunkUrls();
+                ttsResetUi(idx);
+                if (resolveAudio) resolveAudio('interrupted');
+            }
+
+            async function ttsFetchChunkAudio(text, voice, chunkIndex, sessionId) {
+                if (!ttsIsSessionActive(sessionId)) return null;
+                if (ttsChunkUrls.has(chunkIndex)) return ttsChunkUrls.get(chunkIndex);
+                if (ttsChunkRequests.has(chunkIndex)) return ttsChunkRequests.get(chunkIndex);
+
+                const controller = new AbortController();
+                ttsChunkControllers.set(chunkIndex, controller);
+
+                let request;
+                request = (async () => {
+                    try {
+                        const payload = { chavesecreta: TTS_KEY, voz: voice, texto: text };
+                        const res = await fetch(TTS_API, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload),
+                            signal: controller.signal
+                        });
+                        if (!res.ok) {
+                            let errMsg = 'HTTP ' + res.status;
+                            try {
+                                const ct = res.headers.get('content-type') || '';
+                                const errBody = ct.includes('json') ? await res.json() : await res.text();
+                                if (typeof errBody === 'object') errMsg += ': ' + (errBody.error || JSON.stringify(errBody));
+                                else if (errBody) errMsg += ': ' + String(errBody).slice(0, 120);
+                            } catch (_) { }
+                            throw new Error(errMsg);
+                        }
+
+                        const blob = await res.blob();
+                        const url = URL.createObjectURL(blob);
+                        if (!ttsIsSessionActive(sessionId)) {
+                            try { URL.revokeObjectURL(url); } catch (_) { }
+                            return null;
+                        }
+                        ttsChunkUrls.set(chunkIndex, url);
+                        return url;
+                    } catch (e) {
+                        if (e instanceof DOMException && e.name === 'AbortError') return null;
+                        throw e;
+                    } finally {
+                        ttsChunkControllers.delete(chunkIndex);
+                        if (ttsChunkRequests.get(chunkIndex) === request) {
+                            ttsChunkRequests.delete(chunkIndex);
+                        }
+                    }
+                })();
+
+                ttsChunkRequests.set(chunkIndex, request);
+                return request;
+            }
+
+            function ttsPrefetchNext(chunks, voice, chunkIndex, sessionId) {
+                if (!ttsIsSessionActive(sessionId)) return;
+                if (chunkIndex >= chunks.length) return;
+                if (ttsChunkUrls.has(chunkIndex) || ttsChunkRequests.has(chunkIndex)) return;
+                void ttsFetchChunkAudio(chunks[chunkIndex], voice, chunkIndex, sessionId).catch(err => {
+                    if (ttsIsSessionActive(sessionId)) console.warn('[TTS] Prefetch falhou:', err);
+                });
+            }
+
+            function ttsPlayAudioUrl(audioUrl, sessionId) {
+                return new Promise((resolve, reject) => {
+                    if (!ttsIsSessionActive(sessionId)) {
+                        resolve('interrupted');
+                        return;
+                    }
+
+                    const audio = new Audio(audioUrl);
+                    let settled = false;
+                    const finish = (status, error) => {
+                        if (settled) return;
+                        settled = true;
+                        if (ttsCurrentAudioResolver === finish) ttsCurrentAudioResolver = null;
+                        if (ttsAudio === audio) ttsAudio = null;
+                        audio.onended = null;
+                        audio.onerror = null;
+                        if (status === 'error') reject(error || new Error('Erro ao reproduzir audio.'));
+                        else resolve(status);
+                    };
+
+                    ttsAudio = audio;
+                    ttsCurrentAudioResolver = finish;
+                    audio.onended = () => finish('ended');
+                    audio.onerror = () => finish('error', new Error('Erro ao reproduzir audio.'));
+                    audio.play().then(() => {
+                        if (!ttsIsSessionActive(sessionId)) finish('interrupted');
+                    }).catch(err => finish('error', err));
+                });
+            }
+
+            async function ttsPlayChunkQueue(idx, chunks, voice, sessionId) {
+                for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+                    if (!ttsIsSessionActive(sessionId)) return 'interrupted';
+
+                    const currentChunk = chunks[chunkIndex];
+                    ttsSetBarLabel(currentChunk, chunkIndex, chunks.length);
+
+                    const audioUrl = await ttsFetchChunkAudio(currentChunk, voice, chunkIndex, sessionId);
+                    if (!ttsIsSessionActive(sessionId)) return 'interrupted';
+                    if (!audioUrl) return 'interrupted';
+
+                    if (chunkIndex + 1 < chunks.length) {
+                        ttsPrefetchNext(chunks, voice, chunkIndex + 1, sessionId);
+                    }
+
+                    const playStatus = await ttsPlayAudioUrl(audioUrl, sessionId);
+                    if (playStatus !== 'ended') return playStatus;
+
+                    const staleUrl = ttsChunkUrls.get(chunkIndex);
+                    if (staleUrl) {
+                        try { URL.revokeObjectURL(staleUrl); } catch (_) { }
+                        ttsChunkUrls.delete(chunkIndex);
+                    }
+                }
+
+                if (ttsActiveSession === sessionId) {
+                    ttsCleanupPlayback(idx);
+                    return 'completed';
+                }
+                return 'interrupted';
+            }
+
+            async function ttsSpeakMsg(idx) {
+                const msgs = convs[activeId]?.msgs;
+                if (!msgs?.[idx]) return;
+                const rawText = msgs[idx].text || '';
+                // Strip markdown syntax for cleaner TTS
+                const text = rawText
+                    .replace(/```[\s\S]*?```/g, ' [bloco de código] ')
+                    .replace(/`[^`]+`/g, match => match.slice(1, -1))
+                    .replace(/#{1,6}\s/g, '')
+                    .replace(/\*\*(.*?)\*\*/g, '$1')
+                    .replace(/\*(.*?)\*/g, '$1')
+                    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+                    .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
+                    .replace(/^[\s]*[-*+][\s]/gm, '')
+                    .replace(/\n{2,}/g, '. ')
+                    .replace(/\n/g, ' ')
+                    .trim()
+                    .slice(0, 2000);
+
+                if (!text) { toast('⚠ Mensagem vazia.'); return; }
+
+                const voice = document.getElementById('tts-voice-sel')?.value;
+                if (!voice) { toast('⚠ Selecione uma voz em Configuracoes > TTS.'); return; }
+
+                // Stop current if any without rearming Live Mode mid-response
+                ttsStop(undefined, { preserveLiveState: true });
+
+                // Update UI
+                ttsMsgIndex = idx;
+                ttsPlaying = true;
+                const btn = document.getElementById('tts-btn-' + idx);
+                if (btn) btn.classList.add('playing');
+                const bar = document.getElementById('tts-bar');
+                const lbl = document.getElementById('tts-bar-label');
+                if (bar) bar.classList.add('on');
+                if (lbl) lbl.textContent = text.slice(0, 60) + (text.length > 60 ? '…' : '');
+
+                try {
+                    console.log('[TTS] voice selecionada no select:', voice);
+                    console.log('[TTS] texto enviado:', text.slice(0, 80));
+                    const payload = { chavesecreta: TTS_KEY, voz: voice, texto: text };
+                    const res = await fetch(TTS_API, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    if (!res.ok) {
+                        let errMsg = 'HTTP ' + res.status;
+                        try {
+                            const ct = res.headers.get('content-type') || '';
+                            const errBody = ct.includes('json') ? await res.json() : await res.text();
+                            if (typeof errBody === 'object') errMsg += ': ' + (errBody.error || JSON.stringify(errBody));
+                            else if (errBody) errMsg += ': ' + String(errBody).slice(0, 120);
+                        } catch (_) { }
+                        console.error('[TTS] POST error:', errMsg);
+                        throw new Error(errMsg);
+                    }
+
+                    const blob = await res.blob();
+                    const url = URL.createObjectURL(blob);
+                    ttsAudio = new Audio(url);
+
+                    ttsAudio.onended = () => ttsStop(idx);
+                    ttsAudio.onerror = () => { toast('⚠ Erro ao reproduzir áudio.'); ttsStop(idx); };
+                    ttsAudio.play();
+                } catch (e) {
+                    toast('⚠ TTS: ' + e.message);
+                    ttsStop(idx);
+                }
+            }
+
+            function ttsStop(idx, opts = {}) {
+                const hadActivePlayback = !!ttsAudio || ttsPlaying;
+                if (ttsAudio) {
+                    ttsAudio.pause();
+                    ttsAudio = null;
+                }
+                ttsPlaying = false;
+                const i = idx ?? ttsMsgIndex;
+                if (i !== null) {
+                    const btn = document.getElementById('tts-btn-' + i);
+                    if (btn) btn.classList.remove('playing');
+                }
+                ttsMsgIndex = null;
+                document.getElementById('tts-bar')?.classList.remove('on');
+                if (
+                    hadActivePlayback &&
+                    !opts.fromLiveHandler &&
+                    !opts.preserveLiveState &&
+                    liveMode &&
+                    liveState === 'playing' &&
+                    liveSpeakResolver
+                ) {
+                    const resolve = liveSpeakResolver;
+                    liveSpeakResolver = null;
+                    resolve('interrupted');
+                    liveSetHUD('listening', '🎙 Interrompido, pode falar');
+                    setTimeout(() => liveResumeListening(), 120);
+                }
+            }
+
+            async function ttsSpeakMsg(idx) {
+                const msgs = convs[activeId]?.msgs;
+                if (!msgs?.[idx]) return 'missing';
+                const text = ttsFormatText(msgs[idx].text || '');
+
+                if (!text) { toast('âš  Mensagem vazia.'); return 'empty'; }
+
+                const voice = document.getElementById('tts-voice-sel')?.value;
+                if (!voice) { toast('âš  Selecione uma voz em Configuracoes > TTS.'); return 'missing-voice'; }
+
+                ttsStop(undefined, { preserveLiveState: true });
+
+                const chunks = splitTextIntoChunks(text);
+                if (!chunks.length) { toast('âš  Mensagem vazia.'); return 'empty'; }
+
+                const sessionId = ++ttsSessionCounter;
+                ttsActiveSession = sessionId;
+                ttsMsgIndex = idx;
+                ttsPlaying = true;
+                const btn = document.getElementById('tts-btn-' + idx);
+                if (btn) btn.classList.add('playing');
+                const bar = document.getElementById('tts-bar');
+                if (bar) bar.classList.add('on');
+                ttsSetBarLabel(text, 0, chunks.length);
+
+                try {
+                    console.log('[TTS] voice selecionada no select:', voice);
+                    console.log('[TTS] texto total/chunks:', text.length, chunks.length);
+                    return await ttsPlayChunkQueue(idx, chunks, voice, sessionId);
+                } catch (e) {
+                    toast('âš  TTS: ' + e.message);
+                    ttsCleanupPlayback(idx);
+                    return 'error';
+                }
+            }
+
+            function ttsStop(idx, opts = {}) {
+                ttsCleanupPlayback(idx ?? ttsMsgIndex);
+            }
+
+            // Init TTS on load
+            window.addEventListener('DOMContentLoaded', () => {
+                // Quick health check before loading voices
+                fetch(TTS_API + '/health')
+                    .then(r => r.json())
+                    .then(d => {
+                        console.log('[TTS] API online:', d);
+                        ttsLoadVoices().then(() => loadTTSCfg());
+                    })
+                    .catch(e => {
+                        console.warn('[TTS] API offline ou CORS bloqueado:', e.message);
+                        const sel = document.getElementById('tts-voice-sel');
+                        if (sel) sel.innerHTML = '<option value="">API offline — cole Voice ID manualmente</option>';
+                    });
+            });
+
+
+            // ─══════════════════════════════════════════════════════════════
+            // LIVE MODE — Conversa de voz contínua (dual engine)
+            // ─══════════════════════════════════════════════════════════════
+            let liveMode = false;
+            let liveState = 'idle';
+            let liveSilenceTimer = null;
+            let liveBarInterval = null;
+            let liveSilenceStart = null;
+            let liveRecognition = null;
+            let liveRecognitionActive = false;
+            let liveIgnoreSTT = false;
+            let liveSpeakResolver = null;
+            let liveAccum = '';
+            let liveLastDisplay = '';
+            let liveIgnoreUntil = 0;
+            let liveRestartTimer = null;
+            let liveRestartAttempts = 0;
+            let liveNoSpeechCount = 0;
+            let liveLastResultAt = 0;
+            const LIVE_SILENCE_MS = 3000;
+
+            // ─══════════════════════════════════════════════════════════════
+            // GEMINI LIVE — Native Multimodal WebSocket Engine
+            // ─══════════════════════════════════════════════════════════════
+            const geminiLive = {
+                ws: null,
+                captureCtx: null,
+                playbackCtx: null,
+                mediaStream: null,
+                scriptNode: null,
+                sourceNode: null,
+                active: false,
+                sessionModel: '',
+                playbackScheduledTime: 0,
+                pendingTranscript: '',
+                pendingUserTranscript: '',
+                liveStreamingEl: null,
+                liveUserBubble: null,
+                previewRecognition: null,
+                previewRecognitionActive: false,
+                previewText: '',
+                previewRenderedText: '',
+                previewRestartTimer: null,
+                screenShareStream: null,
+                screenShareVideo: null,
+                screenShareCanvas: null,
+                screenShareInterval: null,
+                screenShareActive: false,
+                pendingTrace: [],
+                turnId: 0,
+
+                async connect(apiKey, model) {
+                    if (this.active) this.disconnect();
+                    this.sessionModel = model;
+                    liveSetHUD('processing', '🔄 Conectando ao Gemini Live…');
+
+                    const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+
+                    return new Promise((resolve, reject) => {
+                        let settled = false;
+                        const ws = new WebSocket(url);
+                        this.ws = ws;
+
+                        ws.onopen = () => {
+                            const sysp = document.getElementById('sysp')?.value?.trim() || '';
+                            const liveVoice = document.getElementById('live-voice-sel')?.value || 'Puck';
+
+                            // Build tools with lowercase types (SDK format)
+                            const liveTools = [];
+                            liveTools.push({ googleSearch: {} });
+                            const enabled = plugins.filter(p => p.enabled);
+                            if (enabled.length) {
+                                liveTools.push({
+                                    functionDeclarations: enabled.map(p => ({
+                                        name: p.name,
+                                        description: p.description,
+                                        parameters: lowercaseTypes(normalizeParams(p.parameters))
+                                    }))
+                                });
+                            }
+
+                            const setup = {
+                                setup: {
+                                    model: `models/${model}`,
+                                    generationConfig: {
+                                        responseModalities: ['AUDIO'],
+                                        speechConfig: {
+                                            voiceConfig: {
+                                                prebuiltVoiceConfig: { voiceName: liveVoice }
+                                            }
+                                        }
+                                    },
+                                    outputAudioTranscription: {},
+                                    inputAudioTranscription: {}
+                                }
+                            };
+
+                            // System instruction
+                            if (sysp) {
+                                setup.setup.systemInstruction = { parts: [{ text: sysp }] };
+                            }
+
+                            // Tools
+                            if (liveTools.length) {
+                                setup.setup.tools = liveTools;
+                            }
+
+                            console.log('[GeminiLive] Setup:', JSON.stringify(setup, null, 2));
+                            ws.send(JSON.stringify(setup));
+                        };
+
+                        ws.onmessage = async (event) => {
+                            try {
+                                let raw = event.data;
+                                if (raw instanceof Blob) {
+                                    raw = await raw.text();
+                                }
+                                const msg = JSON.parse(raw);
+                                this.handleMessage(msg, () => {
+                                    if (!settled) { settled = true; resolve(); }
+                                });
+                            } catch (e) {
+                                console.error('[GeminiLive] Parse error:', e);
+                            }
+                        };
+
+                        ws.onerror = (e) => {
+                            console.error('[GeminiLive] WebSocket error:', e);
+                            if (!settled) { settled = true; reject(e); }
+                            this.disconnect();
+                            toast('❌ Erro na conexão Live');
+                        };
+
+                        ws.onclose = (e) => {
+                            console.log('[GeminiLive] Closed:', e.code, e.reason);
+                            if (this.active) {
+                                this.active = false;
+                                liveMode = false;
+                                liveSetHUD('idle', '');
+                                document.getElementById('live-btn')?.classList.remove('on');
+                                toast('🔴 Sessão Live encerrada');
+                            }
+                            if (!settled) { settled = true; reject(new Error(`WebSocket closed: ${e.code} ${e.reason}`)); }
+                        };
+
+                        setTimeout(() => {
+                            if (!settled) { settled = true; reject(new Error('Timeout')); this.disconnect(); }
+                        }, 15000);
+                    });
+                },
+
+                handleMessage(msg, onSetup) {
+                    // Setup complete
+                    if (msg.setupComplete) {
+                        this.active = true;
+                        liveSetHUD('listening', '🎙 Gemini Live Ativo — Fale!');
+                        this.startAudioCapture();
+                        this.startPreviewTranscription();
+                        if (onSetup) onSetup();
+                        return;
+                    }
+
+                    // Server content (audio, transcriptions, turn control)
+                    if (msg.serverContent) {
+                        const sc = msg.serverContent;
+
+                        // Interrupted by user (barge-in)
+                        if (sc.interrupted) {
+                            this.clearPlayback();
+                            // Save partial transcripts before resetting
+                            if ((this.pendingUserTranscript.trim() || this.pendingTranscript.trim() || this.pendingTrace.length) && activeId) {
+                                this.onTurnComplete();
+                            }
+                            this.pendingTranscript = '';
+                            this.pendingUserTranscript = '';
+                            this.pendingTrace = [];
+                            this.liveStreamingEl = null;
+                            this.liveUserBubble = null;
+                            this.clearInputPreview();
+                            this.startPreviewTranscription();
+                            liveSetHUD('listening', '🎙 Interrompido — Ouvindo…');
+                            return;
+                        }
+
+                        // Audio data from model
+                        const parts = sc.modelTurn?.parts || [];
+                        for (const part of parts) {
+                            if (part.inlineData?.mimeType?.includes('audio/pcm')) {
+                                this.stopPreviewTranscription({ preserveDisplay: true });
+                                liveSetHUD('playing', '🔊 Respondendo…');
+                                this.queueAudio(part.inlineData.data);
+                            }
+                        }
+
+                        // Input transcription — what the USER said (speech-to-text)
+                        if (sc.inputTranscription?.text) {
+                            const userText = sc.inputTranscription.text;
+                            console.log('[GeminiLive] InputTranscription:', userText);
+                            this.pendingUserTranscript = this.mergeTranscriptText(this.pendingUserTranscript, userText);
+                            if (!this.previewRecognitionActive || this.isAndroidDevice()) {
+                                this.renderInputPreview(this.pendingUserTranscript);
+                            }
+
+                            // Show user speech in real-time
+                            if (!activeId) newConversation();
+                            if (!this.liveUserBubble) {
+                                const chatEl = document.getElementById('chat');
+                                if (chatEl) {
+                                    const div = document.createElement('div');
+                                    div.className = 'row user animate-in';
+                                    div.innerHTML = `<div class="av">👤</div><div style="flex:1; max-width: calc(100% - 42px);"><div class="bub"><p class="live-user-text"></p></div><div class="meta"><span>${new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}</span> <span style="background:#ff4757;color:#fff;font-size:9px;padding:1px 5px;border-radius:3px;font-weight:700">LIVE</span></div></div>`;
+                                    chatEl.appendChild(div);
+                                    this.liveUserBubble = div.querySelector('.live-user-text');
+                                    chatEl.scrollTop = chatEl.scrollHeight;
+                                }
+                            }
+                            if (this.liveUserBubble) {
+                                this.liveUserBubble.textContent = this.pendingUserTranscript;
+                                document.getElementById('chat').scrollTop = document.getElementById('chat').scrollHeight;
+                            }
+                        }
+
+                        // Output transcription — stream model text in real-time
+                        if (sc.outputTranscription?.text) {
+                            this.stopPreviewTranscription({ preserveDisplay: true });
+                            const modelText = sc.outputTranscription.text;
+                            console.log('[GeminiLive] OutputTranscription:', modelText);
+                            this.pendingTranscript = this.mergeTranscriptText(this.pendingTranscript, modelText);
+
+                            // Show model response text in real-time
+                            if (!activeId) newConversation();
+                            if (!this.liveStreamingEl) {
+                                // Close user bubble when model starts responding
+                                this.liveUserBubble = null;
+
+                                const chatEl = document.getElementById('chat');
+                                if (chatEl) {
+                                    const div = document.createElement('div');
+                                    div.className = 'row model animate-in';
+                                    div.innerHTML = `<div class="av">✦</div><div style="flex:1; max-width: calc(100% - 42px);"><div class="bub"><p class="live-model-text"></p></div><div class="meta"><span>${new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}</span> <span style="color:var(--accent2)">${this.sessionModel || 'gemini-3.1-flash-live-preview'}</span> <span style="background:#ff4757;color:#fff;font-size:9px;padding:1px 5px;border-radius:3px;font-weight:700">LIVE</span></div></div>`;
+                                    chatEl.appendChild(div);
+                                    this.liveStreamingEl = div.querySelector('.live-model-text');
+                                    chatEl.scrollTop = chatEl.scrollHeight;
+                                }
+                            }
+                            if (this.liveStreamingEl) {
+                                this.liveStreamingEl.textContent = this.pendingTranscript;
+                                document.getElementById('chat').scrollTop = document.getElementById('chat').scrollHeight;
+                            }
+                        }
+
+                        if (sc.turnComplete) {
+                            this.onTurnComplete();
+                        }
+                        return;
+                    }
+
+                    // Tool call
+                    if (msg.toolCall) {
+                        this.handleToolCall(msg.toolCall);
+                        return;
+                    }
+                },
+
+                async handleToolCall(toolCall) {
+                    const fcs = toolCall.functionCalls || [];
+                    if (!fcs.length) return;
+
+                    const names = fcs.map(fc => fc.name).join(', ');
+                    liveSetHUD('processing', `⚙ ${names}`);
+
+                    fcs.forEach(fc => {
+                        this.pendingTrace.push(createTraceStep('tool_call', {
+                            title: fc.name || 'tool',
+                            meta: summarizeTraceArgs(fc.args || {})
+                        }));
+                    });
+
+                    const results = await Promise.all(
+                        fcs.map(fc => executePlugin(fc.name, fc.args || {}))
+                    );
+                    results.forEach((result, index) => {
+                        const files = extractToolArtifacts(result);
+                        this.pendingTrace.push(createTraceStep('tool_result', {
+                            title: fcs[index]?.name || 'tool_result',
+                            meta: files.length ? `${files.length} artifact${files.length > 1 ? 's' : ''}` : '',
+                            body: summarizeToolResult(result)
+                        }));
+                    });
+
+                    // Log tool calls to chat
+                    if (false && activeId) {
+                        const toolText = fcs.map((fc, i) => {
+                            const argStr = Object.entries(fc.args || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ');
+                            const resultStr = JSON.stringify(results[i]).slice(0, 500);
+                            return `🔧 **${fc.name}**(${argStr})\n\`\`\`json\n${resultStr}\n\`\`\``;
+                        }).join('\n\n');
+                        convs[activeId].msgs.push({
+                            role: 'model', text: toolText, ts: Date.now(),
+                            model: this.sessionModel, live: true
+                        });
+                        saveConvs(); renderChat();
+                    }
+
+                    const response = {
+                        toolResponse: {
+                            functionResponses: fcs.map((fc, i) => ({
+                                name: fc.name,
+                                id: fc.id,
+                                response: results[i]
+                            }))
+                        }
+                    };
+
+                    if (this.ws?.readyState === WebSocket.OPEN) {
+                        this.ws.send(JSON.stringify(response));
+                    }
+                },
+
+                sendText(text) {
+                    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+                    // realtimeInput.text — matches SDK's sendRealtimeInput({text})
+                    const msg = {
+                        realtimeInput: {
+                            text: text
+                        }
+                    };
+                    this.ws.send(JSON.stringify(msg));
+                    liveSetHUD('processing', '⏳ Processando…');
+                },
+
+                sendTurn({ text = '', images = [], files = [] } = {}) {
+                    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+                    const supportedImages = (images || []).filter(img =>
+                        img?.data && /^(image\/png|image\/jpeg)$/i.test(img.mimeType || '')
+                    );
+                    const rejectedImages = (images || []).filter(img =>
+                        img?.data && !/^(image\/png|image\/jpeg)$/i.test(img.mimeType || '')
+                    );
+
+                    supportedImages.forEach(img => {
+                        this.ws.send(JSON.stringify({
+                            realtimeInput: {
+                                video: {
+                                    data: img.data,
+                                    mimeType: img.mimeType
+                                }
+                            }
+                        }));
+                    });
+
+                    if (text) {
+                        this.ws.send(JSON.stringify({
+                            realtimeInput: {
+                                text
+                            }
+                        }));
+                    }
+
+                    if (!text && supportedImages.length) {
+                        this.ws.send(JSON.stringify({
+                            realtimeInput: {
+                                text: 'Analise as imagens enviadas.'
+                            }
+                        }));
+                    }
+
+                    if (rejectedImages.length) {
+                        toast('⚠ No Gemini 3.1 Live, envie imagens JPG ou PNG.');
+                    }
+                    if (files?.length) {
+                        toast('⚠ Arquivos anexados fora de imagem não são suportados no Gemini 3.1 Live.');
+                    }
+                    if (!text && !supportedImages.length) return;
+                    liveSetHUD('processing', '⏳ Processando…');
+                },
+
+                updateScreenShareUi() {
+                    document.getElementById('live-screen-btn')?.classList.toggle('on', !!this.screenShareActive);
+                },
+
+                async startScreenShare(intervalMs = 5000) {
+                    if (!this.active || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+                        toast('⚠ Ative o Gemini Live antes de compartilhar a tela.');
+                        return false;
+                    }
+                    if (this.screenShareActive) return true;
+
+                    const stream = await navigator.mediaDevices.getDisplayMedia({
+                        video: {
+                            frameRate: { ideal: 1, max: 1 }
+                        },
+                        audio: false
+                    });
+
+                    const video = document.createElement('video');
+                    video.autoplay = true;
+                    video.muted = true;
+                    video.playsInline = true;
+                    video.srcObject = stream;
+                    await video.play();
+
+                    const canvas = document.createElement('canvas');
+                    const track = stream.getVideoTracks()[0];
+                    if (track) {
+                        track.onended = () => {
+                            this.stopScreenShare({ silent: true });
+                        };
+                    }
+
+                    this.screenShareStream = stream;
+                    this.screenShareVideo = video;
+                    this.screenShareCanvas = canvas;
+                    this.screenShareActive = true;
+                    this.updateScreenShareUi();
+                    await this.sendScreenFrame();
+                    this.screenShareInterval = setInterval(() => {
+                        this.sendScreenFrame();
+                    }, intervalMs);
+                    toast('🖥️ Tela compartilhada com o Gemini Live.');
+                    return true;
+                },
+
+                async sendScreenFrame() {
+                    if (!this.screenShareActive || !this.screenShareVideo || !this.screenShareCanvas) return;
+                    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+                    const video = this.screenShareVideo;
+                    const width = video.videoWidth || 0;
+                    const height = video.videoHeight || 0;
+                    if (!width || !height) return;
+
+                    const maxWidth = 1280;
+                    const scale = Math.min(1, maxWidth / width);
+                    const targetWidth = Math.max(1, Math.round(width * scale));
+                    const targetHeight = Math.max(1, Math.round(height * scale));
+                    const canvas = this.screenShareCanvas;
+                    canvas.width = targetWidth;
+                    canvas.height = targetHeight;
+
+                    const ctx = canvas.getContext('2d', { alpha: false });
+                    if (!ctx) return;
+                    ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+
+                    const frameData = canvas.toDataURL('image/jpeg', 0.72).split(',')[1];
+                    if (!frameData) return;
+
+                    this.ws.send(JSON.stringify({
+                        realtimeInput: {
+                            video: {
+                                data: frameData,
+                                mimeType: 'image/jpeg'
+                            }
+                        }
+                    }));
+                },
+
+                stopScreenShare(options = {}) {
+                    clearInterval(this.screenShareInterval);
+                    this.screenShareInterval = null;
+                    if (this.screenShareStream) {
+                        this.screenShareStream.getTracks().forEach(track => track.stop());
+                        this.screenShareStream = null;
+                    }
+                    if (this.screenShareVideo) {
+                        this.screenShareVideo.pause();
+                        this.screenShareVideo.srcObject = null;
+                        this.screenShareVideo = null;
+                    }
+                    this.screenShareCanvas = null;
+                    this.screenShareActive = false;
+                    this.updateScreenShareUi();
+                    if (!options.silent) {
+                        toast('🛑 Compartilhamento de tela encerrado.');
+                    }
+                },
+
+                onTurnComplete() {
+                    if (!activeId) newConversation();
+
+                    // Save user speech transcript (what they said via mic)
+                    if (this.pendingUserTranscript.trim()) {
+                        convs[activeId].msgs.push({
+                            role: 'user',
+                            text: this.pendingUserTranscript.trim(),
+                            ts: Date.now(),
+                            live: true
+                        });
+                        // Auto-title from first user speech
+                        const userMsgs = convs[activeId].msgs.filter(m => m.role === 'user');
+                        if (userMsgs.length === 1) {
+                            const t = this.pendingUserTranscript.trim();
+                            convs[activeId].title = t.slice(0, 48) + (t.length > 48 ? '…' : '');
+                        }
+                    }
+                    this.pendingUserTranscript = '';
+
+                    // Save model speech transcript (what the model said)
+                    if (this.pendingTranscript.trim() || this.pendingTrace.length) {
+                        const modelTrace = this.pendingTrace.slice(0, 30);
+                        modelTrace.push(createTraceStep('final', {
+                            title: 'Resposta final',
+                            meta: 'live',
+                            body: this.pendingTranscript.trim() || 'Turno sem texto final visivel.'
+                        }));
+                        convs[activeId].msgs.push({
+                            role: 'model',
+                            text: this.pendingTranscript.trim() || '[Trace do live disponivel abaixo.]',
+                            ts: Date.now(),
+                            model: this.sessionModel,
+                            live: true,
+                            trace: modelTrace
+                        });
+                    }
+                    this.pendingTranscript = '';
+                    this.pendingTrace = [];
+                    this.previewText = '';
+
+                    // Clear streaming bubble references (renderChat will redraw properly)
+                    this.liveStreamingEl = null;
+                    this.liveUserBubble = null;
+
+                    saveConvs();
+                    renderSidebar();
+                    renderChat();
+
+                    // Resume listening after playback finishes
+                    const remaining = this.playbackCtx
+                        ? Math.max(0, this.playbackScheduledTime - this.playbackCtx.currentTime)
+                        : 0;
+                    setTimeout(() => {
+                        if (this.active) {
+                            this.clearInputPreview();
+                            liveSetHUD('listening', '🎙 Ouvindo…');
+                            this.startPreviewTranscription();
+                        }
+                    }, remaining * 1000 + 300);
+                },
+
+                renderInputPreview(text) {
+                    const msgEl = document.getElementById('msg');
+                    if (!msgEl || !liveMode) return;
+                    msgEl.value = text || '';
+                    this.previewRenderedText = msgEl.value;
+                    autoH(msgEl);
+                },
+
+                clearInputPreview() {
+                    const msgEl = document.getElementById('msg');
+                    if (msgEl && (!msgEl.value.trim() || msgEl.value === this.previewRenderedText)) {
+                        msgEl.value = '';
+                        autoH(msgEl);
+                    }
+                    this.previewRenderedText = '';
+                },
+
+                isAndroidDevice() {
+                    return /Android/i.test(navigator.userAgent || '');
+                },
+
+                mergeTranscriptText(base, chunk) {
+                    const current = String(base || '').replace(/\s+/g, ' ').trim();
+                    const incoming = String(chunk || '').replace(/\s+/g, ' ').trim();
+                    if (!incoming) return current;
+                    if (!current) return incoming;
+                    if (current === incoming || current.endsWith(incoming)) return current;
+                    if (incoming.startsWith(current)) return incoming;
+
+                    const maxOverlap = Math.min(current.length, incoming.length);
+                    for (let len = maxOverlap; len > 0; len--) {
+                        if (current.slice(-len) === incoming.slice(0, len)) {
+                            return `${current}${incoming.slice(len)}`.replace(/\s+/g, ' ').trim();
+                        }
+                    }
+                    return `${current} ${incoming}`.replace(/\s+/g, ' ').trim();
+                },
+
+                startPreviewTranscription() {
+                    if (!this.active || !liveMode) return;
+                    if (this.isAndroidDevice()) return;
+                    if (this.previewRecognitionActive || this.previewRecognition) return;
+                    const SpeechAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
+                    if (!SpeechAPI) return;
+
+                    clearTimeout(this.previewRestartTimer);
+                    this.previewRestartTimer = null;
+                    this.previewText = '';
+                    this.clearInputPreview();
+
+                    const recognition = new SpeechAPI();
+                    recognition.lang = 'pt-BR';
+                    recognition.interimResults = true;
+                    recognition.continuous = true;
+                    recognition.maxAlternatives = 1;
+
+                    recognition.onstart = () => {
+                        this.previewRecognitionActive = true;
+                    };
+
+                    recognition.onresult = (event) => {
+                        if (!this.active || !liveMode) return;
+                        let finalText = this.previewText;
+                        let interimText = '';
+
+                        for (let i = event.resultIndex; i < event.results.length; i++) {
+                            const transcript = event.results[i][0]?.transcript?.trim();
+                            if (!transcript) continue;
+                            if (event.results[i].isFinal) {
+                                finalText = this.mergeTranscriptText(finalText, transcript);
+                            } else {
+                                interimText = this.mergeTranscriptText(interimText, transcript);
+                            }
+                        }
+
+                        this.previewText = finalText.trim();
+                        const displayText = [this.previewText, interimText.trim()].filter(Boolean).join(' ').trim();
+                        if (displayText) {
+                            this.renderInputPreview(displayText);
+                        }
+                    };
+
+                    recognition.onerror = (event) => {
+                        this.previewRecognitionActive = false;
+                        if (event.error === 'no-speech' || event.error === 'aborted') return;
+                        console.warn('[GeminiLive] Preview STT error:', event.error);
+                    };
+
+                    recognition.onend = () => {
+                        this.previewRecognitionActive = false;
+                        this.previewRecognition = null;
+                        if (!this.active || !liveMode || this.pendingTranscript.trim()) return;
+                        clearTimeout(this.previewRestartTimer);
+                        this.previewRestartTimer = setTimeout(() => {
+                            this.startPreviewTranscription();
+                        }, 180);
+                    };
+
+                    this.previewRecognition = recognition;
+                    try {
+                        recognition.start();
+                    } catch (error) {
+                        this.previewRecognition = null;
+                        this.previewRecognitionActive = false;
+                        console.warn('[GeminiLive] Preview STT start failed:', error);
+                    }
+                },
+
+                stopPreviewTranscription(options = {}) {
+                    clearTimeout(this.previewRestartTimer);
+                    this.previewRestartTimer = null;
+                    const recognition = this.previewRecognition;
+                    this.previewRecognition = null;
+                    this.previewRecognitionActive = false;
+                    if (recognition) {
+                        recognition.onstart = null;
+                        recognition.onresult = null;
+                        recognition.onerror = null;
+                        recognition.onend = null;
+                        try { recognition.stop(); } catch (_) { }
+                    }
+                    if (!options.preserveDisplay) {
+                        this.previewText = '';
+                        this.clearInputPreview();
+                    }
+                },
+
+                // ─ Audio Capture: Mic → PCM 16bit 16kHz → WebSocket ─
+                async startAudioCapture() {
+                    try {
+                        const stream = await navigator.mediaDevices.getUserMedia({
+                            audio: {
+                                sampleRate: { ideal: 16000 },
+                                channelCount: 1,
+                                echoCancellation: true,
+                                noiseSuppression: true,
+                                autoGainControl: true
+                            }
+                        });
+
+                        this.mediaStream = stream;
+                        this.captureCtx = new (window.AudioContext || window.webkitAudioContext)({
+                            sampleRate: 16000
+                        });
+
+                        const source = this.captureCtx.createMediaStreamSource(stream);
+                        const processor = this.captureCtx.createScriptProcessor(4096, 1, 1);
+
+                        processor.onaudioprocess = (e) => {
+                            if (!this.active || this.ws?.readyState !== WebSocket.OPEN) return;
+
+                            const float32 = e.inputBuffer.getChannelData(0);
+                            const int16 = new Int16Array(float32.length);
+                            for (let i = 0; i < float32.length; i++) {
+                                const s = Math.max(-1, Math.min(1, float32[i]));
+                                int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                            }
+
+                            const bytes = new Uint8Array(int16.buffer);
+                            let binary = '';
+                            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+                            const base64 = btoa(binary);
+
+                            const msg = {
+                                realtimeInput: {
+                                    audio: {
+                                        mimeType: 'audio/pcm;rate=16000',
+                                        data: base64
+                                    }
+                                }
+                            };
+                            this.ws.send(JSON.stringify(msg));
+                        };
+
+                        source.connect(processor);
+                        processor.connect(this.captureCtx.destination);
+                        this.scriptNode = processor;
+                        this.sourceNode = source;
+                    } catch (e) {
+                        console.error('[GeminiLive] Audio capture error:', e);
+                        toast('⚠ Mic: ' + e.message);
+                        this.disconnect();
+                    }
+                },
+
+                // ─ Audio Playback: PCM from Gemini → Speaker ─
+                queueAudio(base64PCM) {
+                    if (!this.playbackCtx) {
+                        this.playbackCtx = new (window.AudioContext || window.webkitAudioContext)({
+                            sampleRate: 24000
+                        });
+                        this.playbackScheduledTime = 0;
+                    }
+
+                    const binary = atob(base64PCM);
+                    const bytes = new Uint8Array(binary.length);
+                    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                    const int16 = new Int16Array(bytes.buffer);
+
+                    const float32 = new Float32Array(int16.length);
+                    for (let i = 0; i < int16.length; i++) {
+                        float32[i] = int16[i] / (int16[i] < 0 ? 0x8000 : 0x7FFF);
+                    }
+
+                    const buffer = this.playbackCtx.createBuffer(1, float32.length, 24000);
+                    buffer.getChannelData(0).set(float32);
+
+                    const src = this.playbackCtx.createBufferSource();
+                    src.buffer = buffer;
+                    src.connect(this.playbackCtx.destination);
+
+                    const now = this.playbackCtx.currentTime;
+                    const startTime = Math.max(now + 0.01, this.playbackScheduledTime);
+                    src.start(startTime);
+                    this.playbackScheduledTime = startTime + buffer.duration;
+                },
+
+                clearPlayback() {
+                    this.playbackScheduledTime = 0;
+                    if (this.playbackCtx) {
+                        this.playbackCtx.close().catch(() => {});
+                        this.playbackCtx = null;
+                    }
+                },
+
+                disconnect() {
+                    if ((this.pendingUserTranscript.trim() || this.pendingTranscript.trim() || this.pendingTrace.length) && activeId) {
+                        this.onTurnComplete();
+                    }
+                    this.stopPreviewTranscription();
+                    this.stopScreenShare({ silent: true });
+                    this.active = false;
+                    this.pendingTranscript = '';
+                    this.pendingUserTranscript = '';
+                    this.pendingTrace = [];
+                    this.liveStreamingEl = null;
+                    this.liveUserBubble = null;
+
+                    if (this.scriptNode) { this.scriptNode.disconnect(); this.scriptNode = null; }
+                    if (this.sourceNode) { this.sourceNode.disconnect(); this.sourceNode = null; }
+                    if (this.captureCtx) { this.captureCtx.close().catch(() => {}); this.captureCtx = null; }
+                    if (this.mediaStream) {
+                        this.mediaStream.getTracks().forEach(t => t.stop());
+                        this.mediaStream = null;
+                    }
+                    this.clearPlayback();
+                    if (this.ws) { this.ws.close(); this.ws = null; }
+
+                    liveMode = false;
+                    liveSetHUD('idle', '');
+                    document.getElementById('live-btn')?.classList.remove('on');
+                }
+            };
+
+            // ─ HUD helper ─
+            function liveSetHUD(state, label) {
+                liveState = state;
+                const hud = document.getElementById('live-hud');
+                const dot = document.getElementById('live-hud-dot');
+                const lbl = document.getElementById('live-hud-label');
+                const barW = document.getElementById('live-silence-bar-wrap');
+                const bar = document.getElementById('live-silence-bar');
+
+                hud?.classList.toggle('on', state !== 'idle');
+                if (dot) { dot.className = ''; if (state !== 'idle') dot.classList.add(state); }
+                if (lbl) lbl.textContent = label || '';
+                clearInterval(liveBarInterval);
+                if (bar) bar.style.width = '100%';
+                if (barW) barW.style.display = (state === 'listening' && liveSilenceStart) ? 'block' : 'none';
+                if (state === 'listening' && liveSilenceStart) {
+                    liveBarInterval = setInterval(() => {
+                        if (!liveSilenceStart) return;
+                        const pct = Math.max(0, 100 - ((Date.now() - liveSilenceStart) / LIVE_SILENCE_MS) * 100);
+                        if (bar) bar.style.width = pct + '%';
+                        if (pct <= 0) clearInterval(liveBarInterval);
+                    }, 50);
+                }
+            }
+
+            async function startLiveForCurrentModel(options = {}) {
+                const model = document.getElementById('model-sel').value;
+
+                // ═══ Gemini Live API (native WebSocket) ═══
+                if (isLiveModel(model)) {
+                    const apiKey = document.getElementById('api-in').value.trim();
+                    if (!apiKey) {
+                        if (!options.silent) toast('⚠ Insira sua API Key!');
+                        return false;
+                    }
+
+                    const isSecure = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+                    if (!isSecure) {
+                        if (!options.silent) toast('⚠ Live Mode requer HTTPS.');
+                        return false;
+                    }
+                    if (!await ensureMicPermission()) return false;
+
+                    if (!activeId) newConversation();
+
+                    try {
+                        liveMode = true;
+                        document.getElementById('live-btn')?.classList.add('on');
+                        await geminiLive.connect(apiKey, model);
+                        if (!options.silent) toast('✓ Gemini Live conectado!');
+                        return true;
+                    } catch (err) {
+                        liveMode = false;
+                        document.getElementById('live-btn')?.classList.remove('on');
+                        console.error('[GeminiLive] Connect failed:', err);
+                        if (!options.silent) toast('❌ Falha ao conectar: ' + (err.message || 'erro desconhecido'));
+                        return false;
+                    }
+                }
+
+                // ═══ Legacy pipeline (Web Speech API + Ghost TTS) ═══
+                if (!window.SpeechRecognition && !window.webkitSpeechRecognition) {
+                    if (!options.silent) toast('⚠ Live Mode precisa de Chrome ou Edge.');
+                    return false;
+                }
+                const isSecure = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+                if (!isSecure) {
+                    if (!options.silent) toast('⚠ Live Mode requer HTTPS. Mic não funciona em HTTP.');
+                    return false;
+                }
+                const voice = document.getElementById('tts-voice-sel')?.value;
+                if (!voice) {
+                    if (!options.silent) toast('⚠ Selecione uma voz em Configurações > TTS antes de ativar o Live Mode.');
+                    return false;
+                }
+                if (!await ensureMicPermission()) return false;
+
+                liveMode = true;
+                document.getElementById('live-btn')?.classList.add('on');
+                liveInit();
+                return true;
+            }
+
+            // ─ Toggle ─
+            async function toggleLive() {
+                if (geminiLive.active || liveMode || liveRecognitionActive || liveRecognition) {
+                    liveStop();
+                    return;
+                }
+                await startLiveForCurrentModel();
+            }
+
+            async function toggleLiveScreenShare() {
+                const model = document.getElementById('model-sel').value;
+                if (!isLiveModel(model)) {
+                    toast('⚠ Compartilhamento de tela está disponível só no Gemini Live 3.1.');
+                    return;
+                }
+                if (!geminiLive.active) {
+                    toast('⚠ Ative o Gemini Live antes de compartilhar a tela.');
+                    return;
+                }
+                if (geminiLive.screenShareActive) {
+                    geminiLive.stopScreenShare();
+                    return;
+                }
+                try {
+                    await geminiLive.startScreenShare(5000);
+                } catch (error) {
+                    console.error('[GeminiLive] Screen share error:', error);
+                    toast('⚠ Falha ao compartilhar a tela: ' + (error.message || 'erro desconhecido'));
+                    geminiLive.stopScreenShare({ silent: true });
+                }
+            }
+
+            // ─ Init: 1 único recognition ─
+            function liveInit() {
+                const SpeechAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
+                if (!SpeechAPI) { toast('⚠ Chrome/Edge necessário.'); return; }
+
+                stopSpeech();
+                // Limpar recognition anterior antes de criar novo
+                if (liveRecognition) {
+                    try { liveRecognition.abort(); } catch (_) { }
+                    liveRecognition = null;
+                    liveRecognitionActive = false;
+                }
+                setMicStreamEnabled(true);
+                const r = new SpeechAPI();
+                r.lang = 'pt-BR';
+                r.interimResults = true;
+                r.continuous = true;
+                r.maxAlternatives = 1;
+                liveRecognition = r;
+
+                liveAccum = '';
+                liveLastDisplay = '';
+                liveRestartAttempts = 0;
+                liveNoSpeechCount = 0;
+                liveLastResultAt = 0;
+
+                r.onresult = (e) => {
+                    if (liveIgnoreSTT || !liveMode) return;
+                    let interim = '';
+
+                    // Resolve o bug de eco acumulativo no Android
+                    for (let i = e.resultIndex; i < e.results.length; i++) {
+                        if (e.results[i].isFinal) {
+                            liveAccum = geminiLive.mergeTranscriptText(liveAccum, e.results[i][0].transcript.trim());
+                        } else {
+                            interim = geminiLive.mergeTranscriptText(interim, e.results[i][0].transcript);
+                        }
+                    }
+
+                    let display = liveAccum;
+                    if (interim.trim()) {
+                        display += (display ? ' ' : '') + interim.trim();
+                    }
+
+                    const msgEl = document.getElementById('msg');
+                    if (msgEl) { msgEl.value = display; autoH(msgEl); }
+                    liveLastResultAt = Date.now();
+                    liveNoSpeechCount = 0;
+
+                    if (display.trim() && display !== liveLastDisplay) {
+                        liveLastDisplay = display;
+                        clearTimeout(liveSilenceTimer);
+                        liveSilenceStart = Date.now();
+                        liveSetHUD('listening', '🎙 Ouvindo…');
+                        liveSilenceTimer = setTimeout(() => {
+                            if (liveMode && !liveIgnoreSTT && document.getElementById('msg')?.value?.trim()) {
+                                liveAccum = '';
+                                liveLastDisplay = '';
+                                liveTriggerSend();
+                            }
+                        }, LIVE_SILENCE_MS);
+                    }
+                };
+
+                r.onerror = (e) => {
+                    if (e.error === 'not-allowed') { toast('⚠ Mic negado.'); liveStop(); return; }
+                    if (e.error === 'audio-capture') { toast('⚠ Nenhum microfone disponível.'); liveStop(); return; }
+                    if (e.error === 'network') { toast('⚠ Erro de rede no Live Mode.'); liveStop(); return; }
+                    if (e.error === 'service-not-allowed') { toast('⚠ Serviço de voz indisponível (HTTPS requerido).'); liveStop(); return; }
+                    if (e.error === 'aborted') return;
+                    if (e.error === 'no-speech') { liveNoSpeechCount += 1; return; } // Silêncio — onend vai reiniciar automaticamente
+                    console.warn('[Live STT] Erro:', e.error);
+                    toast('⚠ Erro no Live Mode: ' + (e.error || 'desconhecido'));
+                };
+
+                r.onend = () => {
+                    liveRecognitionActive = false;
+                    if (!liveMode || liveIgnoreSTT) return;
+                    clearTimeout(liveRestartTimer);
+                    liveRestartTimer = setTimeout(() => {
+                        if (liveMode && !liveIgnoreSTT && liveRecognition) {
+                            try {
+                                liveRecognition.start();
+                                liveRestartAttempts = 0;
+                            } catch (_) {
+                                liveRestartAttempts += 1;
+                                if (liveRestartAttempts >= 4) {
+                                    const stale = !liveLastResultAt || (Date.now() - liveLastResultAt > 12000);
+                                    if (liveNoSpeechCount >= 2 && stale) {
+                                        toast('⚠ O navegador não detectou fala no Live Mode. Verifique o microfone ativo.');
+                                    }
+                                    liveSetHUD('idle', 'Microfone pausado');
+                                    liveStop();
+                                }
+                            }
+                        } else {
+                            liveSetHUD('idle', 'Microfone pausado');
+                        }
+                    }, 700);
+                };
+
+                r.onstart = () => {
+                    liveRecognitionActive = true;
+                    liveRestartAttempts = 0;
+                    speechBase = '';
+                    const msgEl = document.getElementById('msg');
+                    if (msgEl && !liveAccum) msgEl.value = '';
+                    liveSetHUD('listening', '🎙 Ouvindo…');
+                };
+
+                try { r.start(); } catch (e) { toast('⚠ Mic: ' + e.message); liveStop(); }
+            }
+
+            // ─ Pause STT during processing/TTS ─
+            function livePauseSTT() {
+                liveIgnoreSTT = true;
+                clearTimeout(liveSilenceTimer);
+                clearInterval(liveBarInterval);
+                clearTimeout(liveRestartTimer);
+                liveSilenceStart = null;
+                setMicStreamEnabled(false);
+                if (liveRecognition) {
+                    try { liveRecognition.stop(); } catch (_) { }
+                }
+            }
+
+            // ─ Trigger send ─
+            async function liveTriggerSend() {
+                if (!liveMode) return;
+                clearTimeout(liveSilenceTimer);
+                clearInterval(liveBarInterval);
+                liveSilenceStart = null;
+
+                livePauseSTT();
+                liveSetHUD('processing', '⏳ Processando…');
+
+                await send();
+
+                if (!liveMode) return;
+
+                const msgs = convs[activeId]?.msgs || [];
+                const lastIdx = msgs.length - 1;
+                if (msgs[lastIdx]?.role === 'model' && msgs[lastIdx]?.text) {
+                    liveSetHUD('playing', '🔊 Respondendo…');
+                    await liveSpeak(lastIdx);
+                } else {
+                    liveResumeListening();
+                }
+            }
+
+            // ─ Fala e aguarda fim ─
+            function liveSpeak(msgIdx) {
+                return new Promise(async resolve => {
+                    if (!liveMode) { resolve(); return; }
+                    liveSpeakResolver = resolve;
+
+                    await ttsSpeakMsg(msgIdx);
+
+                    if (!ttsAudio) {
+                        if (liveSpeakResolver) {
+                            const done = liveSpeakResolver;
+                            liveSpeakResolver = null;
+                            done('no-audio');
+                        }
+                        if (liveMode) setTimeout(() => liveResumeListening(), 200);
+                        return;
+                    }
+
+                    ttsAudio.onended = () => {
+                        ttsStop(msgIdx, { fromLiveHandler: true });
+                        if (liveSpeakResolver) {
+                            const done = liveSpeakResolver;
+                            liveSpeakResolver = null;
+                            done('ended');
+                        }
+                        if (liveMode) setTimeout(() => liveResumeListening(), 200);
+                    };
+
+                    ttsAudio.onerror = () => {
+                        ttsStop(msgIdx, { fromLiveHandler: true });
+                        if (liveSpeakResolver) {
+                            const done = liveSpeakResolver;
+                            liveSpeakResolver = null;
+                            done('errored');
+                        }
+                        if (liveMode) setTimeout(() => liveResumeListening(), 200);
+                    };
+                });
+            }
+
+            // ─ Retoma escuta: reinicia recognition do zero ─
+            async function liveSpeak(msgIdx) {
+                if (!liveMode) return 'inactive';
+                liveSpeakResolver = null;
+
+                const status = await ttsSpeakMsg(msgIdx);
+                if (!liveMode) return status;
+
+                if (status === 'completed') {
+                    setTimeout(() => liveResumeListening(), 200);
+                    return 'ended';
+                }
+
+                if (status === 'interrupted') {
+                    liveSetHUD('listening', 'ðŸŽ™ Interrompido, pode falar');
+                    setTimeout(() => liveResumeListening(), 120);
+                    return 'interrupted';
+                }
+
+                setTimeout(() => liveResumeListening(), 200);
+                return status;
+            }
+
+            function liveResumeListening() {
+                if (!liveMode) return;
+                liveIgnoreSTT = false;
+                liveSilenceStart = null;
+                liveAccum = '';
+                liveLastDisplay = '';
+                liveNoSpeechCount = 0;
+                liveRestartAttempts = 0;
+                speechBase = '';
+                const msgEl = document.getElementById('msg');
+                if (msgEl) msgEl.value = '';
+                setTimeout(() => setMicStreamEnabled(true), 200);
+                // Restart recognition fresh
+                if (liveRecognition && !liveRecognitionActive) {
+                    try { liveRecognition.start(); } catch (_) { }
+                }
+                liveSetHUD('listening', '🎙 Ouvindo…');
+            }
+
+            // ─ Para tudo ─
+            function liveStop(options = {}) {
+                // Disconnect Gemini Live WebSocket if active
+                if (geminiLive.active) {
+                    geminiLive.disconnect();
+                }
+                liveMode = false;
+                liveIgnoreSTT = false;
+                clearTimeout(liveSilenceTimer);
+                clearInterval(liveBarInterval);
+                clearTimeout(liveRestartTimer);
+                if (liveRecognition) {
+                    try { liveRecognition.stop(); } catch (_) { }
+                    liveRecognition = null;
+                }
+                liveRecognitionActive = false;
+                liveSpeakResolver = null;
+                liveRestartAttempts = 0;
+                liveNoSpeechCount = 0;
+
+                ttsStop();
+                setMicStreamEnabled(true);
+                liveSetHUD('idle', '');
+                document.getElementById('live-btn')?.classList.remove('on');
+                if (!options.silent) toast('⏹ Live Mode encerrado.');
+            }
+
+            // ─══════════════════════════════════════════════════════════════
+            // DRAG & DROP — Images and files
+            // ─══════════════════════════════════════════════════════════════
+            let dragCounter = 0;
+            document.addEventListener('dragenter', e => {
+                e.preventDefault();
+                dragCounter++;
+                document.getElementById('drop-overlay')?.classList.add('show');
+            });
+            document.addEventListener('dragleave', e => {
+                e.preventDefault();
+                dragCounter--;
+                if (dragCounter <= 0) {
+                    dragCounter = 0;
+                    document.getElementById('drop-overlay')?.classList.remove('show');
+                }
+            });
+            document.addEventListener('dragover', e => e.preventDefault());
+            document.addEventListener('drop', e => {
+                e.preventDefault();
+                dragCounter = 0;
+                document.getElementById('drop-overlay')?.classList.remove('show');
+                const files = e.dataTransfer?.files;
+                if (!files?.length) return;
+                for (const file of files) {
+                    if (file.size > 20 * 1024 * 1024) { toast(`⚠ ${file.name} > 20MB`); continue; }
+                    const isImage = file.type.startsWith('image/');
+                    const reader = new FileReader();
+                    reader.onload = evt => {
+                        const base64 = evt.target.result.split(',')[1];
+                        if (isImage) {
+                            pendingImages.push({ name: file.name, mimeType: file.type, data: base64, url: evt.target.result });
+                        } else {
+                            pendingFiles.push({ mimeType: file.type, data: base64, name: file.name, url: evt.target.result });
+                        }
+                        renderImagePreview();
+                        toast(`📁 ${file.name} adicionado!`);
+                    };
+                    reader.readAsDataURL(file);
+                }
+                document.getElementById('msg')?.focus();
+            });
+
+            // ─══════════════════════════════════════════════════════════════
+            // KEYBOARD SHORTCUTS
+            // ─══════════════════════════════════════════════════════════════
+            document.addEventListener('keydown', e => {
+                // Ctrl+N — new conversation
+                if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+                    e.preventDefault(); newConversation();
+                }
+                // Ctrl+. — stop generation
+                if ((e.ctrlKey || e.metaKey) && e.key === '.') {
+                    e.preventDefault(); stop();
+                }
+                // Ctrl+K — focus search
+                if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+                    e.preventDefault();
+                    const sb = document.getElementById('sidebar');
+                    if (sb.classList.contains('collapsed')) toggleSidebarDesktop();
+                    if (window.innerWidth <= 768 && !sb.classList.contains('open')) openSidebar();
+                    document.getElementById('search-box')?.focus();
+                }
+                // Ctrl+/ — show shortcuts
+                if ((e.ctrlKey || e.metaKey) && e.key === '/') {
+                    e.preventDefault();
+                    document.getElementById('shortcuts-modal')?.classList.toggle('show');
+                }
+                // Escape — close modals
+                if (e.key === 'Escape') {
+                    document.getElementById('shortcuts-modal')?.classList.remove('show');
+                }
+            });
+
+            // ─══════════════════════════════════════════════════════════════
+            // RENAME CONVERSATIONS — Double click
+            // ─══════════════════════════════════════════════════════════════
+            function renameConv(id) {
+                const ci = document.querySelector(`.ci[data-cid="${id}"] .ci-title`);
+                if (!ci) return;
+                const current = convs[id]?.title || '';
+                ci.innerHTML = `<input class="ci-rename-input" value="${esc(current)}" 
+                    onblur="finishRename('${id}', this.value)"
+                    onkeydown="if(event.key==='Enter'){this.blur();}if(event.key==='Escape'){this.value='${esc(current)}';this.blur();}">`;
+                ci.querySelector('input')?.focus();
+                ci.querySelector('input')?.select();
+            }
+            function finishRename(id, newTitle) {
+                newTitle = newTitle.trim();
+                if (newTitle && convs[id]) {
+                    convs[id].title = newTitle;
+                    saveConvs();
+                }
+                renderSidebar();
+            }
+
+            // ─══════════════════════════════════════════════════════════════
+            // OFFLINE/ONLINE INDICATOR
+            // ─══════════════════════════════════════════════════════════════
+            function updateOnlineStatus() {
+                document.getElementById('offline-banner')?.classList.toggle('show', !navigator.onLine);
+            }
+            window.addEventListener('online', updateOnlineStatus);
+            window.addEventListener('offline', updateOnlineStatus);
+            updateOnlineStatus();
+
+        
