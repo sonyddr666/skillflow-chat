@@ -488,6 +488,50 @@
             align-items: flex-start;
         }
 
+        .cfg-inline-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+            width: 100%;
+            margin-bottom: 2px;
+        }
+
+        .cfg-mini-btn {
+            background: var(--s2);
+            border: 1px solid var(--border);
+            color: var(--muted);
+            border-radius: 10px;
+            padding: 7px 11px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all .15s;
+        }
+
+        .cfg-mini-btn:hover,
+        .cfg-mini-btn.on {
+            color: var(--text);
+            border-color: var(--accent);
+            background: rgba(255, 117, 173, .10);
+        }
+
+        .cfg-hint {
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        #cfg-model-advanced {
+            display: none;
+            gap: 18px;
+            flex-wrap: wrap;
+            align-items: flex-start;
+            width: 100%;
+        }
+
+        #cfg-model-advanced.on {
+            display: flex;
+        }
+
         .sg {
             display: flex;
             flex-direction: column;
@@ -2373,22 +2417,30 @@
                     <button id="cfg-close" onclick="toggleCfg()" title="Fechar">✕</button>
                 </div>
                 <div id="cfg-body">
-                    <div class="sg" style="min-width:160px">
+                    <div class="cfg-inline-actions">
+                        <button type="button" id="cfg-model-advanced-toggle" class="cfg-mini-btn"
+                            onclick="toggleModelAdvancedSettings()">Mostrar ajustes avançados</button>
+                        <button type="button" id="cfg-model-defaults" class="cfg-mini-btn"
+                            onclick="resetModelAdvancedSettings()">Usar padrões</button>
+                        <span id="cfg-model-hint" class="cfg-hint">Os controles avançados ficam escondidos por padrão.</span>
+                    </div>
+                    <div id="cfg-model-advanced">
+                    <div class="sg" id="temp-grp" style="min-width:160px">
                         <label>Temperature <b id="tv">1.0</b></label>
                         <input type="range" id="temp" min="0" max="2" step="0.05" value="1.0"
                             oninput="document.getElementById('tv').textContent=parseFloat(this.value).toFixed(2);save()">
                     </div>
-                    <div class="sg" style="min-width:160px">
+                    <div class="sg" id="topp-grp" style="min-width:160px">
                         <label>Top-P <b id="ppv">0.95</b></label>
                         <input type="range" id="topp" min="0" max="1" step="0.01" value="0.95"
                             oninput="document.getElementById('ppv').textContent=parseFloat(this.value).toFixed(2);save()">
                     </div>
-                    <div class="sg" style="min-width:160px">
+                    <div class="sg" id="topk-grp" style="min-width:160px">
                         <label>Top-K <b id="kv">64</b></label>
                         <input type="range" id="topk" min="1" max="100" step="1" value="64"
                             oninput="document.getElementById('kv').textContent=this.value;save()">
                     </div>
-                    <div class="sg">
+                    <div class="sg" id="maxt-grp">
                         <label>Max Tokens</label>
                         <input type="number" id="maxt" value="8192" min="1" max="65536" oninput="save()">
                     </div>
@@ -2401,6 +2453,7 @@
                             <option value="medium">medium</option>
                             <option value="high">high</option>
                         </select>
+                    </div>
                     </div>
                     <div class="sg sg-wide">
                         <label>Persona / System Prompt</label>
@@ -4201,17 +4254,80 @@ return item;`
             }
 
             // ─ SETTINGS ─
+            const DEFAULT_MODEL_ADVANCED_SETTINGS = {
+                temp: '1.0',
+                topp: '0.95',
+                topk: '64',
+                maxt: '8192',
+                think: ''
+            };
+
             function toggleCfg() {
                 const p = document.getElementById('cfg');
                 const b = document.getElementById('cfg-btn');
                 const open = p.classList.toggle('on');
                 b.classList.toggle('on', open);
-                if (open) applyThinkVisibility();
+                if (open) applyModelAdvancedVisibility();
             }
 
-            function applyThinkVisibility() {
+            function modelUsesSamplingControls(model) {
+                return !isCodexModel(model) && !isLiveModel(model);
+            }
+
+            function modelUsesMaxTokensControl(model) {
+                return !isCodexModel(model) && !isLiveModel(model);
+            }
+
+            function setAdvancedSectionOpen(open) {
+                const body = document.getElementById('cfg-model-advanced');
+                const btn = document.getElementById('cfg-model-advanced-toggle');
+                if (body) body.classList.toggle('on', !!open);
+                if (btn) {
+                    btn.classList.toggle('on', !!open);
+                    btn.textContent = open ? 'Esconder ajustes avançados' : 'Mostrar ajustes avançados';
+                }
+            }
+
+            function toggleModelAdvancedSettings(force) {
+                const body = document.getElementById('cfg-model-advanced');
+                const next = typeof force === 'boolean' ? force : !body?.classList.contains('on');
+                setAdvancedSectionOpen(next);
+            }
+
+            function resetModelAdvancedSettings() {
+                document.getElementById('temp').value = DEFAULT_MODEL_ADVANCED_SETTINGS.temp;
+                document.getElementById('tv').textContent = Number(DEFAULT_MODEL_ADVANCED_SETTINGS.temp).toFixed(2);
+                document.getElementById('topp').value = DEFAULT_MODEL_ADVANCED_SETTINGS.topp;
+                document.getElementById('ppv').textContent = Number(DEFAULT_MODEL_ADVANCED_SETTINGS.topp).toFixed(2);
+                document.getElementById('topk').value = DEFAULT_MODEL_ADVANCED_SETTINGS.topk;
+                document.getElementById('kv').textContent = DEFAULT_MODEL_ADVANCED_SETTINGS.topk;
+                document.getElementById('maxt').value = DEFAULT_MODEL_ADVANCED_SETTINGS.maxt;
+                document.getElementById('think-lvl').value = DEFAULT_MODEL_ADVANCED_SETTINGS.think;
+                save();
+                toast('✓ Ajustes avançados restaurados para o padrão.');
+            }
+
+            function applyModelAdvancedVisibility() {
                 const m = document.getElementById('model-sel').value;
-                document.getElementById('think-grp').style.display = (supportsThinking(m) || isCodexModel(m)) ? 'flex' : 'none';
+                const hasSampling = modelUsesSamplingControls(m);
+                const hasMaxTokens = modelUsesMaxTokensControl(m);
+                const hasThinking = supportsThinking(m) || isCodexModel(m);
+                const hasAnyAdvanced = hasSampling || hasMaxTokens || hasThinking;
+                document.getElementById('temp-grp').style.display = hasSampling ? 'flex' : 'none';
+                document.getElementById('topp-grp').style.display = hasSampling ? 'flex' : 'none';
+                document.getElementById('topk-grp').style.display = hasSampling ? 'flex' : 'none';
+                document.getElementById('maxt-grp').style.display = hasMaxTokens ? 'flex' : 'none';
+                document.getElementById('think-grp').style.display = hasThinking ? 'flex' : 'none';
+                document.getElementById('cfg-model-advanced-toggle').style.display = hasAnyAdvanced ? '' : 'none';
+                document.getElementById('cfg-model-defaults').style.display = hasAnyAdvanced ? '' : 'none';
+                if (!hasAnyAdvanced) setAdvancedSectionOpen(false);
+
+                const hint = document.getElementById('cfg-model-hint');
+                if (hint) {
+                    if (isLiveModel(m)) hint.textContent = 'No Gemini Live, esses sliders não entram no modo WebSocket.';
+                    else if (isCodexModel(m)) hint.textContent = 'Nos modelos Codex/GPT-5, use reasoning; sampling clássico fica oculto.';
+                    else hint.textContent = 'Os controles avançados ficam escondidos por padrão.';
+                }
             }
 
             async function onModelChange() {
@@ -4223,7 +4339,7 @@ return item;`
                     liveStop({ silent: true });
                 }
                 syncThinkLevelOptions();
-                applyThinkVisibility();
+                applyModelAdvancedVisibility();
                 syncProviderInput();
                 // Toggle TTS vs Live voice sections
                 const ttsGrp = document.getElementById('tts-voice-grp');
@@ -4370,7 +4486,8 @@ return item;`
                         ? normalizeCodexReasoning(s.think, true)
                         : s.think;
                 }
-                applyThinkVisibility();
+                applyModelAdvancedVisibility();
+                setAdvancedSectionOpen(false);
                 syncProviderInput();
                 loadLiveVoiceCfg();
                 // Apply live model visibility
