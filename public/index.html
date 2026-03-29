@@ -2969,7 +2969,7 @@
                     .filter(Boolean);
             }
 
-            async function requestCodexChat({ auth, model, reasoning, instructions, input, tools }) {
+            async function requestCodexChat({ auth, model, reasoning, instructions, input, tools, signal }) {
                 if (!auth) throw new Error('Cole a credencial do Codex antes de enviar.');
 
                 const user = window.__skillflowAccount?.getUser?.();
@@ -2987,7 +2987,7 @@
                         tools,
                         session_id: user?.id ? `${user.id}-skillflow` : 'skillflow'
                     }),
-                    signal: ctrl.signal
+                    signal
                 });
 
                 let data = null;
@@ -4359,9 +4359,16 @@ return item;`
             // ─ PERSIST ─
             var convs = JSON.parse(localStorage.getItem('gc_convs') || '{}');
             var activeId = null;
-            let ctrl = null;
+            let generationControllers = new Map();
+            let generationSeq = 0;
             let pendingImages = [];
             let systemPromptPresets = [];
+
+            function refreshGenerationUi() {
+                const hasActive = generationControllers.size > 0;
+                document.getElementById('send-btn').disabled = false;
+                document.getElementById('stop-btn').style.display = hasActive ? 'flex' : 'none';
+            }
 
             function renderSystemPromptPresetOptions(selectedId = '') {
                 const sel = document.getElementById('sysp-preset-sel');
@@ -5427,8 +5434,10 @@ return item;`
      <div class="typing"><span></span><span></span><span></span></div></div>`);
                 scrollEnd();
 
-                document.getElementById('send-btn').disabled = true;
-                document.getElementById('stop-btn').style.display = 'flex';
+                const requestId = ++generationSeq;
+                const requestCtrl = new AbortController();
+                generationControllers.set(requestId, requestCtrl);
+                refreshGenerationUi();
 
                 const temp = parseFloat(document.getElementById('temp').value);
                 const topp = parseFloat(document.getElementById('topp').value);
@@ -5473,7 +5482,7 @@ return item;`
 
                     if (m.sig && parts[0]) parts[0].thoughtSignature = m.sig;
                     return { role: m.role === 'model' ? 'model' : 'user', parts };
-                });
+                }).filter(item => Array.isArray(item.parts) && item.parts.length);
 
                 const genCfg = { temperature: temp, topP: topp, topK: topk, maxOutputTokens: maxt };
                 if (supportsThinking(model) && think) genCfg.thinkingConfig = { thinkingLevel: think };
@@ -5491,9 +5500,11 @@ return item;`
                 const fullSysp = (sysp || '') + skillsInstruction;
                 if (fullSysp.trim()) body.systemInstruction = { parts: [{ text: fullSysp }] };
 
-                ctrl = new AbortController();
                 const thinkTimeout = isThinking ? 180000 : 60000;
-                const autoAbort = setTimeout(() => { if (ctrl) ctrl.abort(); }, thinkTimeout);
+                const autoAbort = setTimeout(() => {
+                    if (generationControllers.has(requestId)) requestCtrl.abort();
+                }, thinkTimeout);
+                let mi = null;
                 try {
 
                     async function callAPI(reqBody, bubEl, depth) {
@@ -5502,7 +5513,7 @@ return item;`
                             `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`,
                             {
                                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify(reqBody), signal: ctrl.signal
+                                body: JSON.stringify(reqBody), signal: requestCtrl.signal
                             }
                         );
                         if (!r.ok) {
@@ -5592,7 +5603,7 @@ return item;`
                     }
 
                     document.getElementById(tid)?.remove();
-                    const mi = convs[activeId].msgs.length;
+                    mi = convs[activeId].msgs.length;
                     convs[activeId].msgs.push({
                         role: 'model', text: '', ts: Date.now(), model,
                         think: isThinking ? effectiveThink : undefined
@@ -5625,7 +5636,8 @@ return item;`
                             reasoning: effectiveThink,
                             instructions: sysp,
                             input: inputItems,
-                            tools: codexTools
+                            tools: codexTools,
+                            signal: requestCtrl.signal
                         });
 
                         const payload = result?.payload || {};
@@ -5729,8 +5741,10 @@ return item;`
                     document.getElementById(tid)?.remove();
                     if (err.name === 'AbortError') {
                         toast('⏹ Geração interrompida.');
-                        const last = convs[activeId]?.msgs.at(-1);
-                        if (last?.role === 'model' && !last.text) convs[activeId].msgs.pop();
+                        if (mi !== null) {
+                            const abortedMsg = convs[activeId]?.msgs?.[mi];
+                            if (abortedMsg?.role === 'model' && !abortedMsg.text) convs[activeId].msgs.splice(mi, 1);
+                        }
                     } else {
                         const friendlyMsg = err.message?.includes('Failed to fetch')
                             ? '🌐 Sem conexão ou o servidor demorou demais. Tente de novo.'
@@ -5750,13 +5764,17 @@ return item;`
                     saveConvs();
                 } finally {
                     clearTimeout(autoAbort);
-                    document.getElementById('send-btn').disabled = false;
-                    document.getElementById('stop-btn').style.display = 'none';
-                    ctrl = null; renderSidebar(); scrollEnd();
+                    generationControllers.delete(requestId);
+                    refreshGenerationUi();
+                    renderSidebar(); scrollEnd();
                 }
             }
 
-            function stop() { ctrl?.abort(); }
+            function stop() {
+                generationControllers.forEach(controller => {
+                    try { controller.abort(); } catch (_) { }
+                });
+            }
 
             // ─ EVENTOS ─
             document.getElementById('msg').addEventListener('keydown', e => {
