@@ -2936,15 +2936,33 @@
             function buildCodexFileSummary(file) {
                 const name = file?.name || 'arquivo';
                 const mimeType = file?.mimeType || 'application/octet-stream';
+                const path = file?.path ? `\npath: ${file.path}` : '';
                 const decoded = decodeAttachedText(file);
 
                 if (decoded) {
                     const trimmed = decoded.trim();
                     const limit = 12000;
-                    return `[Arquivo anexo: ${name} (${mimeType})]\n${trimmed.slice(0, limit)}${trimmed.length > limit ? '\n\n[arquivo truncado]' : ''}`;
+                    return `[Arquivo anexo: ${name} (${mimeType})]${path}\n${trimmed.slice(0, limit)}${trimmed.length > limit ? '\n\n[arquivo truncado]' : ''}`;
                 }
 
-                return `[Arquivo anexo: ${name} (${mimeType})]`;
+                return `[Arquivo anexo: ${name} (${mimeType})]${path}`;
+            }
+
+            function buildAttachmentReferenceText(images, files) {
+                const refs = [];
+                (Array.isArray(images) ? images : []).forEach(img => {
+                    const name = img?.name || 'imagem';
+                    const mimeType = img?.mimeType || 'image/*';
+                    const path = img?.path || '';
+                    refs.push(`[Imagem na workspace: ${name} (${mimeType})${path ? ` path=${path}` : ''}]`);
+                });
+                (Array.isArray(files) ? files : []).forEach(file => {
+                    const name = file?.name || 'arquivo';
+                    const mimeType = file?.mimeType || file?.type || 'application/octet-stream';
+                    const path = file?.path || '';
+                    refs.push(`[Arquivo na workspace: ${name} (${mimeType})${path ? ` path=${path}` : ''}]`);
+                });
+                return refs.join('\n');
             }
 
             function buildCodexInputFromMessages(messages) {
@@ -2978,8 +2996,10 @@
                             const includeAttachments = recentAttachmentIndices.has(index);
                             const images = Array.isArray(message.imgs) ? message.imgs : [];
                             const files = Array.isArray(message.files) ? message.files : [];
+                            const refsText = buildAttachmentReferenceText(images, files);
 
                             if (includeAttachments) {
+                                if (refsText) content.push({ type: 'input_text', text: refsText });
                                 images.forEach(img => {
                                     const imageUrl = assetDataUrl(img);
                                     if (!imageUrl) return;
@@ -2993,7 +3013,10 @@
                                 const labels = [];
                                 if (images.length) labels.push(`${images.length} imagem(ns)`);
                                 if (files.length) labels.push(`${files.length} arquivo(s)`);
-                                content.push({ type: 'input_text', text: `[Anexos omitidos do contexto: ${labels.join(' e ')}]` });
+                                content.push({
+                                    type: 'input_text',
+                                    text: `[Anexos omitidos do contexto binario: ${labels.join(' e ')}]\n${refsText}`
+                                });
                             }
                         }
 
@@ -5300,9 +5323,28 @@ return item;`
     </div>`;
             }
 
+            function isRenderableImageFile(file) {
+                const mimeType = String(file?.mimeType || file?.type || '').toLowerCase();
+                const name = String(file?.name || file?.path || '').toLowerCase();
+                return mimeType.startsWith('image/')
+                    || /\.(png|jpe?g|webp|gif|svg)$/.test(name);
+            }
+
+            function renderInlineMessageImage(file) {
+                const src = file?.data
+                    ? `data:${file.mimeType};base64,${file.data}`
+                    : buildMessageFileDownloadUrl(file);
+                if (!src) return renderMessageFile(file);
+                return `<img src="${src}" alt="${esc(file?.name || 'Imagem gerada')}" loading="lazy">`;
+            }
+
             function msgHTML(m, i) {
                 const t = new Date(m.ts).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
                 let body = '';
+                const allFiles = Array.isArray(m.files) ? m.files : [];
+                const imageFiles = allFiles.filter(isRenderableImageFile);
+                const regularFiles = allFiles.filter(file => !isRenderableImageFile(file));
+                if (Array.isArray(m.files)) m.files = regularFiles;
 
                 if (m.imgs && m.imgs.length > 0) {
                     body += `<div class="attached-imgs">${m.imgs.map(img => {
@@ -5314,7 +5356,10 @@ return item;`
                             : `<div class="file-preview"><span class="file-icon">🖼️</span><span>${esc(img?.name || 'Imagem anexada')}</span></div>`;
                     }).join('')}</div>`;
                 }
-                if (false && m.files && m.files.length > 0) {
+                if (imageFiles.length > 0) {
+                    body += `<div class="attached-imgs">${imageFiles.map(renderInlineMessageImage).join('')}</div>`;
+                }
+                if (false) {
                     body += `<div class="attached-imgs">${m.files.map(f => `<div class="file-preview"><span class="file-icon">${f.type === 'application/pdf' ? '📄' : '📝'}</span><span>${esc(f.name)}</span></div>`).join('')}</div>`;
                 }
                 if (m.files && m.files.length > 0) {
@@ -5611,9 +5656,11 @@ return item;`
                     const hasFiles = m.files?.length > 0;
                     const imagePayloads = hasImgs ? m.imgs.filter(img => img?.data) : [];
                     const filePayloads = hasFiles ? m.files.filter(f => f?.data) : [];
+                    const attachmentRefs = buildAttachmentReferenceText(m.imgs || [], m.files || []);
 
                     if ((hasImgs || hasFiles) && imgMsgIndices.has(i)) {
                         if (m.text) parts.push({ text: m.text });
+                        if (attachmentRefs) parts.push({ text: attachmentRefs });
                         if (imagePayloads.length) imagePayloads.forEach(img => {
                             parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
                         });
@@ -5627,7 +5674,7 @@ return item;`
                     } else if ((hasImgs || hasFiles) && !imgMsgIndices.has(i)) {
                         const count = (m.imgs?.length || 0) + (m.files?.length || 0);
                         const note = `[${count} arquivo(s) enviado(s) — omitido(s) do contexto]`;
-                        parts.push({ text: (m.text ? m.text + '\n' : '') + note });
+                        parts.push({ text: (m.text ? m.text + '\n' : '') + note + (attachmentRefs ? '\n' + attachmentRefs : '') });
                     } else {
                         if (m.text) parts.push({ text: m.text });
                     }
