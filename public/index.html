@@ -5248,8 +5248,7 @@ return item;`
             function saveConvs() {
                 const compacted = compactConversationsForStorage(convs);
                 const saved = setStorageItem('gc_convs', JSON.stringify(compacted), {
-                    silent: true,
-                    onQuota: () => setStorageItem('gc_convs', JSON.stringify(reduceConversationsForStorage(convs)), { silent: true })
+                    silent: true
                 });
                 if (!saved) {
                     toast('⚠ Armazenamento local cheio. O navegador reduziu o histórico salvo.');
