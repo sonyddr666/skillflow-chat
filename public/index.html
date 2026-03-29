@@ -5982,10 +5982,18 @@ return item;`
             // ─══════════════════════════════════════════════════════
             const TTS_API = 'https://apitts.ghost1.cloud';
             const TTS_KEY = 'abelhadomato';
+            const TTS_FIRST_CHUNK_MAX_CHARS = 120;
+            const TTS_MAX_CHARS_PER_CHUNK = 250;
             let ttsAudio = null;
             let ttsPlaying = false;
             let ttsVoices = [];
             let ttsMsgIndex = null;
+            let ttsChunkControllers = new Map();
+            let ttsChunkRequests = new Map();
+            let ttsChunkUrls = new Map();
+            let ttsSessionCounter = 0;
+            let ttsActiveSession = 0;
+            let ttsCurrentAudioResolver = null;
 
             function saveTTSCfg() {
                 const voice = document.getElementById('tts-voice-sel')?.value || '';
@@ -6057,6 +6065,262 @@ return item;`
                     sel.innerHTML = '<option value="">Erro ao carregar vozes</option>';
                     toast('⚠ TTS: ' + e.message);
                 }
+            }
+
+            function ttsFormatText(rawText) {
+                return String(rawText || '')
+                    .replace(/```[\s\S]*?```/g, ' [bloco de codigo] ')
+                    .replace(/`[^`]+`/g, match => match.slice(1, -1))
+                    .replace(/#{1,6}\s/g, '')
+                    .replace(/\*\*(.*?)\*\*/g, '$1')
+                    .replace(/\*(.*?)\*/g, '$1')
+                    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+                    .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
+                    .replace(/^[\s]*[-*+][\s]/gm, '')
+                    .replace(/\n{2,}/g, '. ')
+                    .replace(/\n/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+            }
+
+            function ttsSplitLongSegment(text, maxChars) {
+                const parts = [];
+                let remaining = String(text || '').trim();
+                while (remaining.length > maxChars) {
+                    let cut = remaining.lastIndexOf(' ', maxChars);
+                    if (cut < Math.floor(maxChars * 0.6)) cut = maxChars;
+                    parts.push(remaining.slice(0, cut).trim());
+                    remaining = remaining.slice(cut).trim();
+                }
+                if (remaining) parts.push(remaining);
+                return parts;
+            }
+
+            function splitTextIntoChunks(text, firstChunkMaxChars = TTS_FIRST_CHUNK_MAX_CHARS, maxCharsPerChunk = TTS_MAX_CHARS_PER_CHUNK) {
+                const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
+                if (!cleaned) return [];
+
+                const rawSentences = cleaned.match(/[^.!?\n;:]+[.!?\n;:]*/g) || [cleaned];
+                const sentences = rawSentences.map(s => s.trim()).filter(Boolean);
+                const chunks = [];
+                let currentChunk = '';
+
+                const flushCurrent = () => {
+                    if (!currentChunk.trim()) return;
+                    chunks.push(currentChunk.trim());
+                    currentChunk = '';
+                };
+
+                for (const sentence of sentences) {
+                    let pending = [sentence];
+                    while (pending.length) {
+                        const segment = pending.shift();
+                        if (!segment) continue;
+                        const maxChars = chunks.length === 0 ? firstChunkMaxChars : maxCharsPerChunk;
+
+                        if (!currentChunk && segment.length > maxChars) {
+                            const pieces = ttsSplitLongSegment(segment, maxChars);
+                            currentChunk = pieces.shift() || '';
+                            flushCurrent();
+                            if (pieces.length) pending = pieces.concat(pending);
+                            continue;
+                        }
+
+                        const candidate = currentChunk ? `${currentChunk} ${segment}` : segment;
+                        if (candidate.length > maxChars && currentChunk) {
+                            flushCurrent();
+                            pending.unshift(segment);
+                            continue;
+                        }
+
+                        currentChunk = candidate;
+                    }
+                }
+
+                flushCurrent();
+                return chunks.length ? chunks : [cleaned];
+            }
+
+            function ttsIsSessionActive(sessionId) {
+                return !!sessionId && ttsPlaying && ttsActiveSession === sessionId;
+            }
+
+            function ttsRevokeChunkUrls() {
+                for (const url of ttsChunkUrls.values()) {
+                    try { URL.revokeObjectURL(url); } catch (_) { }
+                }
+                ttsChunkUrls.clear();
+            }
+
+            function ttsAbortPendingFetches() {
+                for (const controller of ttsChunkControllers.values()) {
+                    try { controller.abort(); } catch (_) { }
+                }
+                ttsChunkControllers.clear();
+                ttsChunkRequests.clear();
+            }
+
+            function ttsSetBarLabel(text, chunkIndex = 0, totalChunks = 1) {
+                const lbl = document.getElementById('tts-bar-label');
+                if (!lbl) return;
+                const prefix = totalChunks > 1 ? `[${chunkIndex + 1}/${totalChunks}] ` : '';
+                lbl.textContent = prefix + text.slice(0, 60) + (text.length > 60 ? '...' : '');
+            }
+
+            function ttsResetUi(idx) {
+                const targetIdx = idx ?? ttsMsgIndex;
+                if (targetIdx !== null) {
+                    const btn = document.getElementById('tts-btn-' + targetIdx);
+                    if (btn) btn.classList.remove('playing');
+                }
+                ttsMsgIndex = null;
+                document.getElementById('tts-bar')?.classList.remove('on');
+                const lbl = document.getElementById('tts-bar-label');
+                if (lbl) lbl.textContent = '';
+            }
+
+            function ttsCleanupPlayback(idx) {
+                const activeAudio = ttsAudio;
+                const resolveAudio = ttsCurrentAudioResolver;
+                ttsCurrentAudioResolver = null;
+                if (activeAudio) {
+                    activeAudio.onended = null;
+                    activeAudio.onerror = null;
+                    try {
+                        activeAudio.pause();
+                        activeAudio.currentTime = 0;
+                    } catch (_) { }
+                }
+                ttsAudio = null;
+                ttsPlaying = false;
+                ttsActiveSession = 0;
+                ttsAbortPendingFetches();
+                ttsRevokeChunkUrls();
+                ttsResetUi(idx);
+                if (resolveAudio) resolveAudio('interrupted');
+            }
+
+            async function ttsFetchChunkAudio(text, voice, chunkIndex, sessionId) {
+                if (!ttsIsSessionActive(sessionId)) return null;
+                if (ttsChunkUrls.has(chunkIndex)) return ttsChunkUrls.get(chunkIndex);
+                if (ttsChunkRequests.has(chunkIndex)) return ttsChunkRequests.get(chunkIndex);
+
+                const controller = new AbortController();
+                ttsChunkControllers.set(chunkIndex, controller);
+
+                let request;
+                request = (async () => {
+                    try {
+                        const payload = { chavesecreta: TTS_KEY, voz: voice, texto: text };
+                        const res = await fetch(TTS_API, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload),
+                            signal: controller.signal
+                        });
+                        if (!res.ok) {
+                            let errMsg = 'HTTP ' + res.status;
+                            try {
+                                const ct = res.headers.get('content-type') || '';
+                                const errBody = ct.includes('json') ? await res.json() : await res.text();
+                                if (typeof errBody === 'object') errMsg += ': ' + (errBody.error || JSON.stringify(errBody));
+                                else if (errBody) errMsg += ': ' + String(errBody).slice(0, 120);
+                            } catch (_) { }
+                            throw new Error(errMsg);
+                        }
+
+                        const blob = await res.blob();
+                        const url = URL.createObjectURL(blob);
+                        if (!ttsIsSessionActive(sessionId)) {
+                            try { URL.revokeObjectURL(url); } catch (_) { }
+                            return null;
+                        }
+                        ttsChunkUrls.set(chunkIndex, url);
+                        return url;
+                    } catch (e) {
+                        if (e instanceof DOMException && e.name === 'AbortError') return null;
+                        throw e;
+                    } finally {
+                        ttsChunkControllers.delete(chunkIndex);
+                        if (ttsChunkRequests.get(chunkIndex) === request) {
+                            ttsChunkRequests.delete(chunkIndex);
+                        }
+                    }
+                })();
+
+                ttsChunkRequests.set(chunkIndex, request);
+                return request;
+            }
+
+            function ttsPrefetchNext(chunks, voice, chunkIndex, sessionId) {
+                if (!ttsIsSessionActive(sessionId)) return;
+                if (chunkIndex >= chunks.length) return;
+                if (ttsChunkUrls.has(chunkIndex) || ttsChunkRequests.has(chunkIndex)) return;
+                void ttsFetchChunkAudio(chunks[chunkIndex], voice, chunkIndex, sessionId).catch(err => {
+                    if (ttsIsSessionActive(sessionId)) console.warn('[TTS] Prefetch falhou:', err);
+                });
+            }
+
+            function ttsPlayAudioUrl(audioUrl, sessionId) {
+                return new Promise((resolve, reject) => {
+                    if (!ttsIsSessionActive(sessionId)) {
+                        resolve('interrupted');
+                        return;
+                    }
+
+                    const audio = new Audio(audioUrl);
+                    let settled = false;
+                    const finish = (status, error) => {
+                        if (settled) return;
+                        settled = true;
+                        if (ttsCurrentAudioResolver === finish) ttsCurrentAudioResolver = null;
+                        if (ttsAudio === audio) ttsAudio = null;
+                        audio.onended = null;
+                        audio.onerror = null;
+                        if (status === 'error') reject(error || new Error('Erro ao reproduzir audio.'));
+                        else resolve(status);
+                    };
+
+                    ttsAudio = audio;
+                    ttsCurrentAudioResolver = finish;
+                    audio.onended = () => finish('ended');
+                    audio.onerror = () => finish('error', new Error('Erro ao reproduzir audio.'));
+                    audio.play().then(() => {
+                        if (!ttsIsSessionActive(sessionId)) finish('interrupted');
+                    }).catch(err => finish('error', err));
+                });
+            }
+
+            async function ttsPlayChunkQueue(idx, chunks, voice, sessionId) {
+                for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+                    if (!ttsIsSessionActive(sessionId)) return 'interrupted';
+
+                    const currentChunk = chunks[chunkIndex];
+                    ttsSetBarLabel(currentChunk, chunkIndex, chunks.length);
+
+                    const audioUrl = await ttsFetchChunkAudio(currentChunk, voice, chunkIndex, sessionId);
+                    if (!ttsIsSessionActive(sessionId)) return 'interrupted';
+                    if (!audioUrl) return 'interrupted';
+
+                    if (chunkIndex + 1 < chunks.length) {
+                        ttsPrefetchNext(chunks, voice, chunkIndex + 1, sessionId);
+                    }
+
+                    const playStatus = await ttsPlayAudioUrl(audioUrl, sessionId);
+                    if (playStatus !== 'ended') return playStatus;
+
+                    const staleUrl = ttsChunkUrls.get(chunkIndex);
+                    if (staleUrl) {
+                        try { URL.revokeObjectURL(staleUrl); } catch (_) { }
+                        ttsChunkUrls.delete(chunkIndex);
+                    }
+                }
+
+                if (ttsActiveSession === sessionId) {
+                    ttsCleanupPlayback(idx);
+                    return 'completed';
+                }
+                return 'interrupted';
             }
 
             async function ttsSpeakMsg(idx) {
@@ -6158,6 +6422,46 @@ return item;`
                     liveSetHUD('listening', '🎙 Interrompido, pode falar');
                     setTimeout(() => liveResumeListening(), 120);
                 }
+            }
+
+            async function ttsSpeakMsg(idx) {
+                const msgs = convs[activeId]?.msgs;
+                if (!msgs?.[idx]) return 'missing';
+                const text = ttsFormatText(msgs[idx].text || '');
+
+                if (!text) { toast('âš  Mensagem vazia.'); return 'empty'; }
+
+                const voice = document.getElementById('tts-voice-sel')?.value;
+                if (!voice) { toast('âš  Selecione uma voz em Configuracoes > TTS.'); return 'missing-voice'; }
+
+                ttsStop(undefined, { preserveLiveState: true });
+
+                const chunks = splitTextIntoChunks(text);
+                if (!chunks.length) { toast('âš  Mensagem vazia.'); return 'empty'; }
+
+                const sessionId = ++ttsSessionCounter;
+                ttsActiveSession = sessionId;
+                ttsMsgIndex = idx;
+                ttsPlaying = true;
+                const btn = document.getElementById('tts-btn-' + idx);
+                if (btn) btn.classList.add('playing');
+                const bar = document.getElementById('tts-bar');
+                if (bar) bar.classList.add('on');
+                ttsSetBarLabel(text, 0, chunks.length);
+
+                try {
+                    console.log('[TTS] voice selecionada no select:', voice);
+                    console.log('[TTS] texto total/chunks:', text.length, chunks.length);
+                    return await ttsPlayChunkQueue(idx, chunks, voice, sessionId);
+                } catch (e) {
+                    toast('âš  TTS: ' + e.message);
+                    ttsCleanupPlayback(idx);
+                    return 'error';
+                }
+            }
+
+            function ttsStop(idx, opts = {}) {
+                ttsCleanupPlayback(idx ?? ttsMsgIndex);
             }
 
             // Init TTS on load
@@ -7250,6 +7554,28 @@ return item;`
             }
 
             // ─ Retoma escuta: reinicia recognition do zero ─
+            async function liveSpeak(msgIdx) {
+                if (!liveMode) return 'inactive';
+                liveSpeakResolver = null;
+
+                const status = await ttsSpeakMsg(msgIdx);
+                if (!liveMode) return status;
+
+                if (status === 'completed') {
+                    setTimeout(() => liveResumeListening(), 200);
+                    return 'ended';
+                }
+
+                if (status === 'interrupted') {
+                    liveSetHUD('listening', 'ðŸŽ™ Interrompido, pode falar');
+                    setTimeout(() => liveResumeListening(), 120);
+                    return 'interrupted';
+                }
+
+                setTimeout(() => liveResumeListening(), 200);
+                return status;
+            }
+
             function liveResumeListening() {
                 if (!liveMode) return;
                 liveIgnoreSTT = false;
