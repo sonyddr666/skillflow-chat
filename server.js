@@ -20,6 +20,7 @@ const systemPromptsDir = join(systemDir, "system-prompts");
 const sessions = new Map();
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
+const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 const OPENAI_OAUTH_CLIENT_ID = process.env.OPENAI_OAUTH_CLIENT_ID || "app_EMoamEEZ73f0CkXaXp7hrann";
 const DEFAULT_CODEX_MODEL = "gpt-5.4-mini";
 const DEFAULT_CODEX_REASONING = "medium";
@@ -27,18 +28,48 @@ const DEFAULT_CODEX_HISTORY_LIMIT = 40;
 const DEFAULT_CODEX_INSTRUCTIONS = process.env.SKILLFLOW_CODEX_DEFAULT_INSTRUCTIONS
   || "Responda em portugues do Brasil e mantenha continuidade com base na conversa.";
 const CODEX_FAKE_RESPONSES = false;
+const DEFAULT_REQUEST_BODY_LIMIT_BYTES = 10 * 1024 * 1024;
+const DEFAULT_FS_READ_MAX_BYTES = 64 * 1024;
+const MAX_FS_READ_MAX_BYTES = 512 * 1024;
 const EXECUTION_STATE_KEY = "sf_exec";
 const DEFAULT_EXEC_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_EXEC_TIMEOUT_MS = 60 * 60 * 1000;
 const MAX_EXEC_HISTORY_ITEMS = 100;
 const MAX_EXEC_LOG_TAIL_BYTES = 64 * 1024;
+const DEFAULT_EXEC_ALLOWED_BINS = [
+  "node",
+  "npm",
+  "npx",
+  "python",
+  "python3",
+  "py",
+  "deno",
+  "bash",
+  "sh"
+];
+const EXEC_ALLOW_SHELL = ["1", "true", "yes", "on"].includes(String(process.env.SKILLFLOW_EXEC_ALLOW_SHELL || "").trim().toLowerCase());
+const EXEC_ALLOWED_BINS = new Set(
+  String(process.env.SKILLFLOW_EXEC_ALLOWED_BINS || DEFAULT_EXEC_ALLOWED_BINS.join(","))
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean)
+);
+const EXEC_ALLOW_ALL_BINS = EXEC_ALLOWED_BINS.has("*");
+const AUTH_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const AUTH_RATE_LIMIT_MAX_ATTEMPTS = 12;
+const CHAT_JOB_STATUS_RUNNING = "running";
+const CHAT_JOB_STATUS_COMPLETED = "completed";
+const CHAT_JOB_STATUS_FAILED = "failed";
 const activeExecutions = new Map();
+const activeChatJobs = new Map();
+const rateLimitStore = new Map();
 
 const STATE_KEYS = [
   "gc_cfg",
   "gc_theme",
   "gc_plugins",
   "gc_convs",
+  "gc_activeId",
   "gc_user_memory",
   "gc_pending_approvals",
   "gc_skill_packs",
@@ -65,13 +96,25 @@ function sendJson(res, status, payload, extraHeaders = {}) {
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Access-Control-Allow-Origin": "*",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Permissions-Policy": "camera=(self), microphone=(self), geolocation=()",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
     ...extraHeaders
   });
   res.end(JSON.stringify(payload));
 }
 
 function sendRedirect(res, location) {
-  res.writeHead(302, { Location: location });
+  res.writeHead(302, {
+    Location: location,
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Permissions-Policy": "camera=(self), microphone=(self), geolocation=()",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY"
+  });
   res.end();
 }
 
@@ -84,10 +127,31 @@ function attachmentDisposition(fileName) {
   return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 
-async function readRequestBody(req) {
+async function readRequestBody(req, maxBytes = DEFAULT_REQUEST_BODY_LIMIT_BYTES) {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let total = 0;
+  for await (const chunk of req) {
+    total += chunk.length;
+    if (total > maxBytes) {
+      const error = new Error("Payload too large");
+      error.statusCode = 413;
+      throw error;
+    }
+    chunks.push(chunk);
+  }
   return Buffer.concat(chunks).toString("utf8");
+}
+
+async function parseJsonBody(req, maxBytes = DEFAULT_REQUEST_BODY_LIMIT_BYTES) {
+  const raw = await readRequestBody(req, maxBytes);
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const error = new Error("Invalid JSON body");
+    error.statusCode = 400;
+    throw error;
+  }
 }
 
 function parseCookies(req) {
@@ -106,6 +170,27 @@ function sessionCookie(token) {
 
 function clearSessionCookie() {
   return "sf_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0";
+}
+
+function getClientIp(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "").trim();
+  if (forwarded) return forwarded.split(",")[0].trim();
+  return String(req.socket?.remoteAddress || "unknown");
+}
+
+function enforceRateLimit(key, max = AUTH_RATE_LIMIT_MAX_ATTEMPTS, windowMs = AUTH_RATE_LIMIT_WINDOW_MS) {
+  const now = Date.now();
+  const current = rateLimitStore.get(key);
+  const entry = current && current.resetAt > now
+    ? current
+    : { count: 0, resetAt: now + windowMs };
+  entry.count += 1;
+  rateLimitStore.set(key, entry);
+  if (entry.count > max) {
+    const error = new Error("Rate limit exceeded");
+    error.statusCode = 429;
+    throw error;
+  }
 }
 
 function normalizeLogin(value) {
@@ -171,6 +256,10 @@ function userRunsDir(user) {
   return join(userWorkspaceDir(user), ".runs");
 }
 
+function userChatJobsDir(user) {
+  return join(userWorkspaceDir(user), ".chat-jobs");
+}
+
 function userStateFile(user) {
   return join(userStateDir, `${user.id}.json`);
 }
@@ -184,6 +273,7 @@ async function ensureUserDirs(user) {
   await mkdir(userSkillsDir(user), { recursive: true });
   await mkdir(userWorkspaceDir(user), { recursive: true });
   await mkdir(userRunsDir(user), { recursive: true });
+  await mkdir(userChatJobsDir(user), { recursive: true });
   if (!existsSync(userStateFile(user))) {
     await writeFile(userStateFile(user), "{}\n", "utf8");
   }
@@ -306,6 +396,126 @@ function workspacePath(user, input) {
     throw new Error("Path escapes workspace root");
   }
   return { rel, absolute };
+}
+
+function generateChatJobId() {
+  return `chat_${Date.now().toString(36)}_${randomBytes(4).toString("hex")}`;
+}
+
+function chatJobPaths(user, jobId) {
+  const safeId = sanitizeId(jobId);
+  const dir = join(userChatJobsDir(user), safeId);
+  return {
+    id: safeId,
+    dir,
+    meta: join(dir, "meta.json"),
+    stream: join(dir, "stream.sse"),
+    result: join(dir, "result.json")
+  };
+}
+
+async function writeChatJobMeta(user, jobId, meta) {
+  const paths = chatJobPaths(user, jobId);
+  await mkdir(paths.dir, { recursive: true });
+  await writeFile(paths.meta, `${JSON.stringify(meta, null, 2)}\n`, "utf8");
+  return meta;
+}
+
+async function readChatJobMeta(user, jobId) {
+  const paths = chatJobPaths(user, jobId);
+  try {
+    const raw = await readFile(paths.meta, "utf8");
+    return JSON.parse(raw);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      const notFound = new Error("Chat job nao encontrado.");
+      notFound.statusCode = 404;
+      throw notFound;
+    }
+    throw error;
+  }
+}
+
+async function readChatJobSnapshot(user, jobId) {
+  const paths = chatJobPaths(user, jobId);
+  const meta = await readChatJobMeta(user, jobId);
+  const snapshot = { job: meta };
+
+  if (meta.provider === "gemini" && existsSync(paths.stream)) {
+    snapshot.raw_sse = await readFile(paths.stream, "utf8");
+  }
+
+  if (existsSync(paths.result)) {
+    snapshot.result = JSON.parse(await readFile(paths.result, "utf8"));
+  }
+
+  return snapshot;
+}
+
+function normalizeChatJobPayload(input) {
+  const payload = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const provider = String(payload.provider || "").trim().toLowerCase();
+
+  if (provider === "gemini") {
+    const model = String(payload.model || "").trim();
+    if (!model) {
+      const error = new Error("model ausente.");
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!payload.request || typeof payload.request !== "object" || Array.isArray(payload.request)) {
+      const error = new Error("request invalido.");
+      error.statusCode = 400;
+      throw error;
+    }
+    return {
+      provider,
+      model,
+      request: payload.request,
+      api_key: String(payload.api_key || "").trim()
+    };
+  }
+
+  if (provider === "codex") {
+    if (!payload.auth) {
+      const error = new Error("auth ausente.");
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!payload.model) {
+      const error = new Error("model ausente.");
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!Array.isArray(payload.messages) || !payload.messages.length) {
+      if (!Array.isArray(payload.input) || !payload.input.length) {
+        const error = new Error("messages/input ausente.");
+        error.statusCode = 400;
+        throw error;
+      }
+    }
+    if (payload.tools !== undefined && !Array.isArray(payload.tools)) {
+      const error = new Error("tools invalido.");
+      error.statusCode = 400;
+      throw error;
+    }
+    return {
+      provider,
+      auth: payload.auth,
+      model: String(payload.model),
+      reasoning: payload.reasoning || DEFAULT_CODEX_REASONING,
+      history_limit: payload.history_limit ?? DEFAULT_CODEX_HISTORY_LIMIT,
+      instructions: payload.instructions || DEFAULT_CODEX_INSTRUCTIONS,
+      input: Array.isArray(payload.input) ? payload.input : null,
+      messages: Array.isArray(payload.messages) ? payload.messages : [],
+      tools: payload.tools,
+      session_id: payload.session_id
+    };
+  }
+
+  const error = new Error("Unsupported provider for backend chat route");
+  error.statusCode = 400;
+  throw error;
 }
 
 function entryTypeFromStats(stats) {
@@ -447,6 +657,10 @@ function clampExecLogTailBytes(value) {
   return clampInteger(value, 16 * 1024, 512, MAX_EXEC_LOG_TAIL_BYTES);
 }
 
+function clampFsReadMaxBytes(value) {
+  return clampInteger(value, DEFAULT_FS_READ_MAX_BYTES, 256, MAX_FS_READ_MAX_BYTES);
+}
+
 function parseOptionalBoolean(value, fallback) {
   if (value === undefined || value === null || value === "") return fallback;
   if (typeof value === "boolean") return value;
@@ -500,6 +714,55 @@ function normalizeExecPayload(input) {
     stdin: input.stdin === undefined || input.stdin === null ? "" : String(input.stdin),
     timeoutMs: clampExecTimeoutMs(input.timeout_ms)
   };
+}
+
+function normalizeExecCommandName(command) {
+  const raw = String(command || "").trim();
+  if (!raw) return "";
+  const match = raw.match(/^("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/);
+  const token = (match ? match[1] : raw)
+    .replace(/^['"]|['"]$/g, "");
+  const leaf = token.split(/[\\/]/).at(-1) || token;
+  return leaf.replace(/\.exe$/i, "").toLowerCase();
+}
+
+function validateExecPolicy(payload) {
+  const commandName = normalizeExecCommandName(payload.command);
+  if (!commandName) {
+    const error = new Error("command is required");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (!EXEC_ALLOW_ALL_BINS && !EXEC_ALLOWED_BINS.has(commandName)) {
+    const error = new Error(`Comando bloqueado por politica: ${commandName}`);
+    error.statusCode = 403;
+    throw error;
+  }
+
+  if (payload.shell && !EXEC_ALLOW_SHELL) {
+    const error = new Error("Execucao com shell=true esta desabilitada por politica");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  if (payload.shell) {
+    const blockedPatterns = [
+      /\brm\s+-rf\b/i,
+      /\bmkfs\b/i,
+      /\bdd\s+if=/i,
+      /\bcurl\b.*\|\s*(?:sh|bash)\b/i,
+      /\bwget\b.*\|\s*(?:sh|bash)\b/i,
+      />\s*\/etc\//i
+    ];
+    for (const pattern of blockedPatterns) {
+      if (pattern.test(payload.command)) {
+        const error = new Error("Comando shell bloqueado por politica");
+        error.statusCode = 403;
+        throw error;
+      }
+    }
+  }
 }
 
 function buildExecutionRequestSnapshot(payload, cwd) {
@@ -656,6 +919,7 @@ async function listExecutionHistory(user, limit) {
 
 async function createExecution(user, input) {
   const payload = normalizeExecPayload(input);
+  validateExecPolicy(payload);
   const workdir = workspacePath(user, payload.cwd);
   const runId = generateRunId();
   const paths = executionPaths(user, runId);
@@ -1330,74 +1594,265 @@ async function runCodexChat(payload) {
   };
 }
 
-async function handleChatApi(req, res, user) {
-  if (req.method === "OPTIONS") {
-    res.writeHead(204, {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type"
-    });
-    res.end();
-    return;
+async function proxyGeminiStream(res, payload) {
+  const model = String(payload.model || "").trim();
+  if (!model) {
+    const error = new Error("model ausente.");
+    error.statusCode = 400;
+    throw error;
   }
 
-  if (req.method !== "POST") {
-    sendJson(res, 405, { error: "Method not allowed" });
-    return;
+  if (!payload.request || typeof payload.request !== "object" || Array.isArray(payload.request)) {
+    const error = new Error("request invalido.");
+    error.statusCode = 400;
+    throw error;
   }
 
-  const raw = await readRequestBody(req);
-  const payload = raw ? JSON.parse(raw) : {};
-  const provider = String(payload.provider || "").trim().toLowerCase();
-
-  if (provider !== "codex") {
-    sendJson(res, 400, { error: "Unsupported provider for backend chat route" });
-    return;
+  const apiKey = String(process.env.GEMINI_API_KEY || payload.api_key || "").trim();
+  if (!apiKey) {
+    const error = new Error("GEMINI_API_KEY ausente no servidor e nenhuma api_key foi enviada.");
+    error.statusCode = 400;
+    throw error;
   }
 
-  if (!payload.auth) {
-    sendJson(res, 400, { error: "auth ausente." });
-    return;
-  }
-
-  if (!payload.model) {
-    sendJson(res, 400, { error: "model ausente." });
-    return;
-  }
-
-  if (!Array.isArray(payload.messages) || !payload.messages.length) {
-    if (!Array.isArray(payload.input) || !payload.input.length) {
-      sendJson(res, 400, { error: "messages/input ausente." });
-      return;
+  const upstream = await fetch(
+    `${GEMINI_API_BASE_URL}/${encodeURIComponent(model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload.request)
     }
+  );
+
+  if (!upstream.ok || !upstream.body) {
+    const raw = await upstream.text();
+    const error = new Error(raw || `Gemini falhou com HTTP ${upstream.status}`);
+    error.statusCode = upstream.status || 502;
+    throw error;
   }
 
-  if (payload.tools !== undefined && !Array.isArray(payload.tools)) {
-    sendJson(res, 400, { error: "tools invalido." });
-    return;
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Connection": "keep-alive",
+    "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), geolocation=()",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY"
+  });
+
+  for await (const chunk of upstream.body) {
+    res.write(chunk);
+  }
+  res.end();
+}
+
+async function runGeminiChatJob(user, jobId, payload) {
+  const paths = chatJobPaths(user, jobId);
+  const apiKey = String(process.env.GEMINI_API_KEY || payload.api_key || "").trim();
+  if (!apiKey) {
+    const error = new Error("GEMINI_API_KEY ausente no servidor e nenhuma api_key foi enviada.");
+    error.statusCode = 400;
+    throw error;
   }
 
+  await mkdir(paths.dir, { recursive: true });
+  const upstream = await fetch(
+    `${GEMINI_API_BASE_URL}/${encodeURIComponent(payload.model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload.request)
+    }
+  );
+
+  if (!upstream.ok || !upstream.body) {
+    const raw = await upstream.text();
+    const error = new Error(raw || `Gemini falhou com HTTP ${upstream.status}`);
+    error.statusCode = upstream.status || 502;
+    throw error;
+  }
+
+  const stream = createWriteStream(paths.stream, { flags: "w", encoding: "utf8" });
+  try {
+    for await (const chunk of upstream.body) {
+      if (!stream.write(Buffer.from(chunk).toString("utf8"))) {
+        await new Promise((resolve) => stream.once("drain", resolve));
+      }
+    }
+    stream.end();
+    await new Promise((resolve, reject) => {
+      stream.on("finish", resolve);
+      stream.on("error", reject);
+    });
+    await writeFile(paths.result, `${JSON.stringify({ ok: true, provider: "gemini" }, null, 2)}\n`, "utf8");
+  } catch (error) {
+    stream.destroy();
+    throw error;
+  }
+}
+
+async function runCodexChatJob(user, jobId, payload) {
+  const paths = chatJobPaths(user, jobId);
+  await mkdir(paths.dir, { recursive: true });
   const result = await runCodexChat({
     auth: payload.auth,
     model: payload.model,
     reasoning: payload.reasoning || DEFAULT_CODEX_REASONING,
     history_limit: payload.history_limit ?? DEFAULT_CODEX_HISTORY_LIMIT,
     instructions: payload.instructions || DEFAULT_CODEX_INSTRUCTIONS,
-    input: Array.isArray(payload.input) ? payload.input : null,
+    input: payload.input,
     messages: payload.messages,
     tools: payload.tools,
     session_id: payload.session_id || `${user.id}-skillflow`
   });
-
   const contextItems = Array.isArray(payload.input) && payload.input.length
     ? payload.input
     : buildCodexContextMessages(payload.messages, payload.history_limit);
-
-  sendJson(res, 200, {
+  const snapshot = {
     ok: true,
     provider: "codex",
     model: payload.model,
     reasoning: payload.reasoning || DEFAULT_CODEX_REASONING,
+    context_message_count: contextItems.length,
+    auth: result.auth,
+    payload: result.data
+  };
+  await writeFile(paths.result, `${JSON.stringify(snapshot, null, 2)}\n`, "utf8");
+}
+
+async function finalizeChatJob(user, jobId, updater) {
+  const previous = await readChatJobMeta(user, jobId);
+  const next = {
+    ...previous,
+    ...updater,
+    updated_at: new Date().toISOString()
+  };
+  if (next.status === CHAT_JOB_STATUS_COMPLETED || next.status === CHAT_JOB_STATUS_FAILED) {
+    next.finished_at = next.finished_at || new Date().toISOString();
+  }
+  await writeChatJobMeta(user, jobId, next);
+  return next;
+}
+
+async function executeChatJob(user, jobId, payload) {
+  activeChatJobs.set(jobId, { startedAt: Date.now(), provider: payload.provider });
+  try {
+    if (payload.provider === "gemini") {
+      await runGeminiChatJob(user, jobId, payload);
+    } else if (payload.provider === "codex") {
+      await runCodexChatJob(user, jobId, payload);
+    } else {
+      const error = new Error("Unsupported provider for backend chat route");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    await finalizeChatJob(user, jobId, {
+      status: CHAT_JOB_STATUS_COMPLETED,
+      error: null
+    });
+  } catch (error) {
+    await finalizeChatJob(user, jobId, {
+      status: CHAT_JOB_STATUS_FAILED,
+      error: {
+        message: error.message,
+        statusCode: error.statusCode || 500
+      }
+    });
+  } finally {
+    activeChatJobs.delete(jobId);
+  }
+}
+
+async function createChatJob(user, input) {
+  await ensureUserDirs(user);
+  const payload = normalizeChatJobPayload(input);
+  const jobId = generateChatJobId();
+  const meta = {
+    id: jobId,
+    provider: payload.provider,
+    model: payload.model,
+    status: CHAT_JOB_STATUS_RUNNING,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    finished_at: null,
+    error: null
+  };
+  await writeChatJobMeta(user, jobId, meta);
+  executeChatJob(user, jobId, payload).catch((error) => {
+    console.error(`[ChatJob] ${jobId} falhou:`, error);
+  });
+  return meta;
+}
+
+async function handleChatApi(req, res, user) {
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type"
+    });
+    res.end();
+    return;
+  }
+
+  const url = new URL(req.url || "/api/chat", `http://${req.headers.host}`);
+
+  if (req.method === "POST" && url.pathname === "/api/chat/jobs") {
+    const payload = await parseJsonBody(req);
+    const job = await createChatJob(user, payload);
+    sendJson(res, 202, { ok: true, job });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname.startsWith("/api/chat/jobs/")) {
+    const jobId = sanitizeId(url.pathname.slice("/api/chat/jobs/".length));
+    if (!jobId) {
+      sendJson(res, 400, { error: "job id ausente." });
+      return;
+    }
+    const snapshot = await readChatJobSnapshot(user, jobId);
+    sendJson(res, 200, { ok: true, ...snapshot, active: activeChatJobs.has(jobId) });
+    return;
+  }
+
+  if (req.method !== "POST" || url.pathname !== "/api/chat") {
+    sendJson(res, 405, { error: "Method not allowed" });
+    return;
+  }
+
+  const payload = await parseJsonBody(req);
+  const normalized = normalizeChatJobPayload(payload);
+  const provider = normalized.provider;
+
+  if (provider === "gemini") {
+    await proxyGeminiStream(res, normalized);
+    return;
+  }
+
+  const result = await runCodexChat({
+    auth: normalized.auth,
+    model: normalized.model,
+    reasoning: normalized.reasoning || DEFAULT_CODEX_REASONING,
+    history_limit: normalized.history_limit ?? DEFAULT_CODEX_HISTORY_LIMIT,
+    instructions: normalized.instructions || DEFAULT_CODEX_INSTRUCTIONS,
+    input: Array.isArray(normalized.input) ? normalized.input : null,
+    messages: normalized.messages,
+    tools: normalized.tools,
+    session_id: normalized.session_id || `${user.id}-skillflow`
+  });
+
+  const contextItems = Array.isArray(normalized.input) && normalized.input.length
+    ? normalized.input
+    : buildCodexContextMessages(normalized.messages, normalized.history_limit);
+
+  sendJson(res, 200, {
+    ok: true,
+    provider: "codex",
+    model: normalized.model,
+    reasoning: normalized.reasoning || DEFAULT_CODEX_REASONING,
     context_message_count: contextItems.length,
     auth: result.auth,
     payload: result.data
@@ -1416,8 +1871,8 @@ async function handleAuthRoutes(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/auth/register") {
-    const raw = await readRequestBody(req);
-    const payload = raw ? JSON.parse(raw) : {};
+    enforceRateLimit(`${getClientIp(req)}:auth:register`);
+    const payload = await parseJsonBody(req);
     const user = await createUser(payload.login, payload.password);
     const token = startSession(user);
     sendJson(res, 200, { ok: true, user: { id: user.id, login: user.login } }, {
@@ -1427,8 +1882,8 @@ async function handleAuthRoutes(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/auth/login") {
-    const raw = await readRequestBody(req);
-    const payload = raw ? JSON.parse(raw) : {};
+    enforceRateLimit(`${getClientIp(req)}:auth:login`);
+    const payload = await parseJsonBody(req);
     const login = normalizeLogin(payload.login);
     const password = String(payload.password || "");
     const users = await loadUsers();
@@ -1472,8 +1927,7 @@ async function handleGhostSearch(req, res, user) {
   }
 
   try {
-    const raw = await readRequestBody(req);
-    const payload = raw ? JSON.parse(raw) : {};
+    const payload = await parseJsonBody(req);
     if (!payload.user_id) payload.user_id = user.id;
 
     const upstream = await fetch("https://api.ghost1.cloud/search", {
@@ -1510,8 +1964,7 @@ async function handleSkillsApi(req, res, url, user) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/skills") {
-    const raw = await readRequestBody(req);
-    const payload = raw ? JSON.parse(raw) : {};
+    const payload = await parseJsonBody(req);
     const skill = normalizeSkillPayload(payload);
     await writeFile(skillFilePath(user, skill.id), `${JSON.stringify(skill, null, 2)}\n`, "utf8");
     sendJson(res, 200, { ok: true, skill });
@@ -1556,8 +2009,7 @@ async function handleSystemPromptsApi(req, res, url, user) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/system-prompts") {
-    const raw = await readRequestBody(req);
-    const payload = raw ? JSON.parse(raw) : {};
+    const payload = await parseJsonBody(req);
     const filePath = systemPromptFilePath(payload.id || payload.name);
     const existing = existsSync(filePath) ? JSON.parse(await readFile(filePath, "utf8")) : null;
     const next = normalizeSystemPromptPayload(payload, user, existing);
@@ -1625,18 +2077,24 @@ async function handleFsApi(req, res, url, user) {
 
   if (req.method === "GET" && url.pathname === "/api/fs/read") {
     const requestedPath = url.searchParams.get("path") || "";
+    const maxBytes = clampFsReadMaxBytes(url.searchParams.get("max_bytes"));
     const { rel, absolute } = workspacePath(user, requestedPath);
     const stats = await lstat(absolute);
     if (!stats.isFile()) {
       sendJson(res, 400, { error: "Path is not a file" });
       return;
     }
+    const buffer = await readFile(absolute);
+    const truncated = buffer.length > maxBytes;
+    const content = (truncated ? buffer.subarray(0, maxBytes) : buffer).toString("utf8");
     sendJson(res, 200, {
       path: rel,
       type: "file",
       size: stats.size,
       updated_at: stats.mtime.toISOString(),
-      content: await readFile(absolute, "utf8")
+      max_bytes: maxBytes,
+      truncated,
+      content
     });
     return;
   }
@@ -1667,8 +2125,7 @@ async function handleFsApi(req, res, url, user) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/fs/write") {
-    const raw = await readRequestBody(req);
-    const payload = raw ? JSON.parse(raw) : {};
+    const payload = await parseJsonBody(req);
     if (!payload.path) {
       sendJson(res, 400, { error: "path is required" });
       return;
@@ -1693,8 +2150,7 @@ async function handleFsApi(req, res, url, user) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/fs/mkdir") {
-    const raw = await readRequestBody(req);
-    const payload = raw ? JSON.parse(raw) : {};
+    const payload = await parseJsonBody(req);
     if (!payload.path) {
       sendJson(res, 400, { error: "path is required" });
       return;
@@ -1706,8 +2162,7 @@ async function handleFsApi(req, res, url, user) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/fs/rename") {
-    const raw = await readRequestBody(req);
-    const payload = raw ? JSON.parse(raw) : {};
+    const payload = await parseJsonBody(req);
     if (!payload.path || !payload.next_path) {
       sendJson(res, 400, { error: "path and next_path are required" });
       return;
@@ -1762,8 +2217,7 @@ async function handleExecApi(req, res, url, user) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/exec") {
-    const raw = await readRequestBody(req);
-    const payload = raw ? JSON.parse(raw) : {};
+    const payload = await parseJsonBody(req);
     const run = await createExecution(user, payload);
     sendJson(res, 202, { ok: true, run });
     return;
@@ -1867,8 +2321,7 @@ async function handleStateApi(req, res, user) {
   }
 
   if (req.method === "POST") {
-    const raw = await readRequestBody(req);
-    const payload = raw ? JSON.parse(raw) : {};
+    const payload = await parseJsonBody(req);
     const current = await loadUserState(user);
     const next = { ...current };
     const incomingState = payload.state && typeof payload.state === "object" ? payload.state : {};
@@ -1892,7 +2345,14 @@ async function serveStatic(req, res, user) {
   if (pathname === "/" || pathname === "/index.html") {
     if (!user) {
       const loginPath = join(publicDir, "login.html");
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), geolocation=()",
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY"
+      });
       createReadStream(loginPath).pipe(res);
       return;
     }
@@ -1922,7 +2382,12 @@ async function serveStatic(req, res, user) {
   const noCacheExt = [".html", ".css", ".js"].includes(ext);
   res.writeHead(200, {
     "Content-Type": contentType,
-    "Cache-Control": noCacheExt ? "no-cache, no-store, must-revalidate" : "public, max-age=3600"
+    "Cache-Control": noCacheExt ? "no-cache, no-store, must-revalidate" : "public, max-age=3600",
+    "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), geolocation=()",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY"
   });
   createReadStream(finalPath).pipe(res);
 }
@@ -1946,7 +2411,7 @@ const server = createServer(async (req, res) => {
     try {
       await handleAuthRoutes(req, res, url);
     } catch (error) {
-      sendJson(res, 500, { error: `auth failed: ${error.message}` });
+      sendJson(res, error.statusCode || 500, { error: `auth failed: ${error.message}` });
     }
     return;
   }
@@ -1960,7 +2425,7 @@ const server = createServer(async (req, res) => {
         await handleGhostSearch(req, res, authUser);
         return;
       }
-      if (url.pathname === "/api/chat") {
+      if (url.pathname === "/api/chat" || url.pathname.startsWith("/api/chat/")) {
         await handleChatApi(req, res, authUser);
         return;
       }
@@ -1986,7 +2451,7 @@ const server = createServer(async (req, res) => {
       }
       sendJson(res, 404, { error: "Not found" });
     } catch (error) {
-      sendJson(res, 500, { error: `api failed: ${error.message}` });
+      sendJson(res, error.statusCode || 500, { error: `api failed: ${error.message}` });
     }
     return;
   }
@@ -1994,7 +2459,7 @@ const server = createServer(async (req, res) => {
   try {
     await serveStatic(req, res, user);
   } catch (error) {
-    sendJson(res, 500, { error: `static-serve failed: ${error.message}` });
+    sendJson(res, error.statusCode || 500, { error: `static-serve failed: ${error.message}` });
   }
 });
 

@@ -4203,6 +4203,15 @@ return item;`
                 return trace;
             }
 
+            function pushMessageTraceOnce(message, step) {
+                const trace = ensureMessageTrace(message);
+                const last = trace[trace.length - 1];
+                if (last && last.type === step?.type && last.title === step?.title && last.body === step?.body) {
+                    return trace;
+                }
+                return pushMessageTrace(message, step);
+            }
+
             function pushToolCallTrace(message, call) {
                 pushMessageTrace(message, createTraceStep('tool_call', {
                     title: call?.name || 'tool',
@@ -4242,7 +4251,8 @@ return item;`
                 const steps = Array.isArray(trace) ? trace.filter(Boolean) : [];
                 if (!steps.length) return '';
                 const summary = buildTraceSummary(steps);
-                return `<details class="msg-trace">
+                const shouldOpen = steps.some(step => step?.type === 'tool_call' || step?.type === 'tool_result');
+                return `<details class="msg-trace"${shouldOpen ? ' open' : ''}>
   <summary>
     <span class="msg-trace-title">${esc(summary.label)}</span>
     <span class="msg-trace-count">${esc(summary.meta)}</span>
@@ -4907,6 +4917,8 @@ return item;`
                 document.getElementById('theme-btn').textContent = theme === 'dark' ? '🌙' : '☀️';
 
                 const s = readCfg();
+                const savedActiveId = localStorage.getItem('gc_activeId');
+                if (savedActiveId && convs[savedActiveId]) activeId = savedActiveId;
                 if (s.model) {
                     const sel = document.getElementById('model-sel');
                     if ([...sel.options].some(o => o.value === s.model)) sel.value = s.model;
@@ -5027,17 +5039,35 @@ return item;`
                 return `conv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
             }
 
+            function newMessageId(prefix = 'msg') {
+                const uuid = globalThis.crypto?.randomUUID?.();
+                if (uuid) return `${prefix}_${uuid}`;
+                return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+            }
+
             function normalizeImportedMessage(message, fallbackTs) {
                 if (!message || typeof message !== 'object') return null;
                 const role = message.role === 'model' || message.role === 'assistant' ? 'model' : 'user';
                 const text = typeof message.text === 'string'
                     ? message.text
                     : (typeof message.content === 'string' ? message.content : '');
+                const ts = importedTimestamp(message.ts || message.created_at || message.updated_at, fallbackTs);
+                const existingId = [message.id, message.mid, message.message_id]
+                    .find(value => typeof value === 'string' && value.trim());
+                const chatJobId = typeof message?.chatJob?.id === 'string' && message.chatJob.id.trim()
+                    ? message.chatJob.id.trim()
+                    : '';
                 return {
                     ...message,
+                    id: existingId?.trim() || (chatJobId ? `msg_${chatJobId}` : `msg_${stableHash(JSON.stringify({
+                        role,
+                        ts,
+                        live: !!message.live,
+                        model: message.model || ''
+                    }))}`),
                     role,
                     text,
-                    ts: importedTimestamp(message.ts || message.created_at || message.updated_at, fallbackTs),
+                    ts,
                     imgs: Array.isArray(message.imgs) ? message.imgs.filter(Boolean) : [],
                     files: Array.isArray(message.files) ? message.files.filter(Boolean) : []
                 };
@@ -5216,7 +5246,7 @@ return item;`
                             .sort((a, b) => (convs[b]?.ts || 0) - (convs[a]?.ts || 0))[0] || activeId;
                         saveConvs();
                         renderSidebar();
-                        renderChat();
+                renderChat();
                         await window.__skillflowAccount?.syncState?.({ force: true });
                         toast('✓ Conversas importadas!');
                     } catch (err) {
@@ -5283,14 +5313,791 @@ return item;`
                 return reduced;
             }
 
+            function parseStoredConversationMap(rawValue) {
+                if (!rawValue) return {};
+                try {
+                    const parsed = JSON.parse(rawValue);
+                    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+                } catch {
+                    return {};
+                }
+            }
+
+            function cloneSerializable(value, fallback = null) {
+                try {
+                    return JSON.parse(JSON.stringify(value));
+                } catch {
+                    return fallback;
+                }
+            }
+
+            function messageFreshness(message, fallbackTs = 0) {
+                if (!message || typeof message !== 'object') return fallbackTs || 0;
+                const chatJob = message.chatJob && typeof message.chatJob === 'object' ? message.chatJob : null;
+                return Math.max(
+                    Number(message.ts) || 0,
+                    Number(chatJob?.updatedAt) || 0,
+                    Number(chatJob?.startedAt) || 0,
+                    fallbackTs || 0
+                );
+            }
+
+            function conversationFreshness(conversation) {
+                if (!conversation || typeof conversation !== 'object') return 0;
+                const baseTs = Number(conversation.ts) || 0;
+                const msgs = conversationMessages(conversation);
+                return msgs.reduce((maxTs, message) => Math.max(maxTs, messageFreshness(message, baseTs)), baseTs);
+            }
+
+            function hasPendingChatJob(conversation) {
+                const msgs = conversationMessages(conversation);
+                return msgs.some(message => {
+                    if (message?.role !== 'model') return false;
+                    const status = String(message?.chatJob?.status || '').toLowerCase();
+                    return status && !['completed', 'failed', 'cancelled'].includes(status);
+                });
+            }
+
+            function chatJobStatusRank(status) {
+                switch (String(status || '').toLowerCase()) {
+                    case 'completed': return 5;
+                    case 'failed': return 4;
+                    case 'cancelled': return 3;
+                    case 'running': return 2;
+                    case 'preparing': return 1;
+                    default: return 0;
+                }
+            }
+
+            function conversationTitlePriority(title) {
+                const normalized = String(title || '').trim();
+                if (!normalized) return 0;
+                if (/^nova conversa$/i.test(normalized)) return 1;
+                if (/^conversa importada\b/i.test(normalized)) return 2;
+                if (/^conversa sem titulo$/i.test(normalized)) return 2;
+                return 3;
+            }
+
+            function chooseBetterConversationTitle(localTitle, remoteTitle) {
+                const localPriority = conversationTitlePriority(localTitle);
+                const remotePriority = conversationTitlePriority(remoteTitle);
+                if (localPriority > remotePriority) return localTitle;
+                if (remotePriority > localPriority) return remoteTitle;
+                return String(localTitle || '').trim().length >= String(remoteTitle || '').trim().length
+                    ? localTitle
+                    : remoteTitle;
+            }
+
+            function mergeChatJobState(localChatJob, remoteChatJob) {
+                const local = localChatJob && typeof localChatJob === 'object' ? localChatJob : null;
+                const remote = remoteChatJob && typeof remoteChatJob === 'object' ? remoteChatJob : null;
+                if (!local && !remote) return undefined;
+                if (!local) return cloneSerializable(remote, remote);
+                if (!remote) return cloneSerializable(local, local);
+
+                const localRank = chatJobStatusRank(local.status);
+                const remoteRank = chatJobStatusRank(remote.status);
+                const primary = localRank >= remoteRank ? local : remote;
+                const secondary = primary === local ? remote : local;
+                const merged = { ...cloneSerializable(secondary, secondary), ...cloneSerializable(primary, primary) };
+
+                if (!merged.id) merged.id = primary.id || secondary.id || undefined;
+                if (!merged.provider) merged.provider = primary.provider || secondary.provider || undefined;
+                if (!merged.pendingRequest && (primary.pendingRequest || secondary.pendingRequest)) {
+                    merged.pendingRequest = cloneSerializable(primary.pendingRequest || secondary.pendingRequest, primary.pendingRequest || secondary.pendingRequest);
+                }
+                if (!merged.resumeState && (primary.resumeState || secondary.resumeState)) {
+                    merged.resumeState = cloneSerializable(primary.resumeState || secondary.resumeState, primary.resumeState || secondary.resumeState);
+                }
+                if (!merged.error && (primary.error || secondary.error)) {
+                    merged.error = primary.error || secondary.error;
+                }
+                merged.updatedAt = Math.max(
+                    Number(primary.updatedAt) || 0,
+                    Number(secondary.updatedAt) || 0,
+                    Number(primary.startedAt) || 0,
+                    Number(secondary.startedAt) || 0
+                ) || merged.updatedAt;
+                merged.startedAt = Math.max(
+                    Number(primary.startedAt) || 0,
+                    Number(secondary.startedAt) || 0
+                ) || merged.startedAt;
+                return merged;
+            }
+
+            function messageStorageKey(message, index = 0) {
+                if (!message || typeof message !== 'object') return `msg:${index}:empty`;
+                if (typeof message.id === 'string' && message.id.trim()) return `id:${message.id.trim()}`;
+                const chatJob = message.chatJob && typeof message.chatJob === 'object' ? message.chatJob : null;
+                if (chatJob?.id) return `job:${chatJob.id}`;
+                const fingerprint = {
+                    role: message.role || '',
+                    ts: importedTimestamp(message.ts || message.created_at || message.updated_at, index),
+                    model: message.model || '',
+                    live: !!message.live,
+                    provider: chatJob?.provider || '',
+                    imgs: Array.isArray(message.imgs) ? message.imgs.length : 0,
+                    files: Array.isArray(message.files) ? message.files.length : 0
+                };
+                return `msg:${stableHash(JSON.stringify(fingerprint))}`;
+            }
+
+            function mergeMessageVersions(localMessage, remoteMessage, fallbackTs = 0) {
+                const local = localMessage && typeof localMessage === 'object' ? localMessage : {};
+                const remote = remoteMessage && typeof remoteMessage === 'object' ? remoteMessage : {};
+                const localFreshness = messageFreshness(local, fallbackTs);
+                const remoteFreshness = messageFreshness(remote, fallbackTs);
+                const primary = localFreshness >= remoteFreshness ? local : remote;
+                const secondary = primary === local ? remote : local;
+                const merged = { ...cloneSerializable(secondary, secondary), ...cloneSerializable(primary, primary) };
+                merged.id = primary.id || secondary.id || merged.id || null;
+
+                const primaryText = typeof primary.text === 'string' ? primary.text : '';
+                const secondaryText = typeof secondary.text === 'string' ? secondary.text : '';
+                if (secondaryText.length > primaryText.length) merged.text = secondaryText;
+                else if (primaryText || secondaryText) merged.text = primaryText || secondaryText;
+
+                const primaryTrace = Array.isArray(primary.trace) ? primary.trace : [];
+                const secondaryTrace = Array.isArray(secondary.trace) ? secondary.trace : [];
+                if (primaryTrace.length || secondaryTrace.length) {
+                    merged.trace = primaryTrace.length >= secondaryTrace.length ? primaryTrace : secondaryTrace;
+                }
+
+                const primaryImgs = Array.isArray(primary.imgs) ? primary.imgs : [];
+                const secondaryImgs = Array.isArray(secondary.imgs) ? secondary.imgs : [];
+                if (primaryImgs.length || secondaryImgs.length) {
+                    merged.imgs = primaryImgs.length >= secondaryImgs.length ? primaryImgs : secondaryImgs;
+                }
+
+                const primaryFiles = Array.isArray(primary.files) ? primary.files : [];
+                const secondaryFiles = Array.isArray(secondary.files) ? secondary.files : [];
+                if (primaryFiles.length || secondaryFiles.length) {
+                    merged.files = primaryFiles.length >= secondaryFiles.length ? primaryFiles : secondaryFiles;
+                }
+
+                const mergedChatJob = mergeChatJobState(primary.chatJob, secondary.chatJob);
+                if (mergedChatJob) merged.chatJob = mergedChatJob;
+
+                merged.ts = Math.max(
+                    Number(primary.ts) || 0,
+                    Number(secondary.ts) || 0,
+                    fallbackTs || 0
+                ) || merged.ts;
+                return merged;
+            }
+
+            function mergeMessageLists(localMessages, remoteMessages, fallbackTs = 0) {
+                const mergedByKey = new Map();
+                const order = [];
+                const ingest = (messages) => {
+                    const list = Array.isArray(messages) ? messages : [];
+                    list.forEach((message, index) => {
+                        if (!message || typeof message !== 'object') return;
+                        const key = messageStorageKey(message, index);
+                        if (mergedByKey.has(key)) {
+                            mergedByKey.set(key, mergeMessageVersions(mergedByKey.get(key), message, fallbackTs));
+                            return;
+                        }
+                        mergedByKey.set(key, cloneSerializable(message, message));
+                        order.push({ key, index: order.length });
+                    });
+                };
+
+                ingest(remoteMessages);
+                ingest(localMessages);
+
+                return order
+                    .map((entry) => ({ ...entry, message: mergedByKey.get(entry.key) }))
+                    .sort((a, b) => {
+                        const tsDelta = (Number(a.message?.ts) || 0) - (Number(b.message?.ts) || 0);
+                        return tsDelta !== 0 ? tsDelta : a.index - b.index;
+                    })
+                    .map((entry) => entry.message);
+            }
+
+            function mergeConversationRecords(localConversation, remoteConversation) {
+                const local = conversationRecord(localConversation);
+                const remote = conversationRecord(remoteConversation);
+                const localFreshness = conversationFreshness(local);
+                const remoteFreshness = conversationFreshness(remote);
+                const primary = localFreshness >= remoteFreshness ? local : remote;
+                const secondary = primary === local ? remote : local;
+                const merged = { ...cloneSerializable(secondary, secondary), ...cloneSerializable(primary, primary) };
+                merged.msgs = mergeMessageLists(local.msgs, remote.msgs, Math.max(localFreshness, remoteFreshness));
+                merged.uid = primary.uid || secondary.uid || buildConversationUid(merged);
+                merged.ts = Math.max(localFreshness, remoteFreshness, conversationTs(local), conversationTs(remote), 0);
+                merged.title = chooseBetterConversationTitle(
+                    conversationTitle(local, 'Nova Conversa'),
+                    conversationTitle(remote, 'Nova Conversa')
+                ) || 'Nova Conversa';
+                return merged;
+            }
+
+            function mergeConversationMaps(localConversations, remoteConversations) {
+                const local = localConversations && typeof localConversations === 'object' && !Array.isArray(localConversations)
+                    ? localConversations
+                    : {};
+                const remote = remoteConversations && typeof remoteConversations === 'object' && !Array.isArray(remoteConversations)
+                    ? remoteConversations
+                    : {};
+                const merged = {};
+                const ids = new Set([...Object.keys(remote), ...Object.keys(local)]);
+                ids.forEach((id) => {
+                    if (!local[id]) {
+                        merged[id] = cloneSerializable(remote[id], remote[id]);
+                        return;
+                    }
+                    if (!remote[id]) {
+                        merged[id] = cloneSerializable(local[id], local[id]);
+                        return;
+                    }
+                    merged[id] = mergeConversationRecords(local[id], remote[id]);
+                });
+                return merged;
+            }
+
+            function selectBestActiveConversationId(preferredId = null) {
+                if (preferredId && convs[preferredId]) return preferredId;
+                if (activeId && convs[activeId]) return activeId;
+                return Object.keys(convs)
+                    .sort((a, b) => conversationFreshness(convs[b]) - conversationFreshness(convs[a]))[0] || null;
+            }
+
+            function applyStoredConversationSnapshot(rawValue, preferredActiveId = null) {
+                const incoming = parseStoredConversationMap(rawValue);
+                convs = mergeConversationMaps(convs, incoming);
+                activeId = selectBestActiveConversationId(preferredActiveId);
+                renderSidebar();
+                renderChat();
+            }
+
+            let conversationStorageSyncBound = false;
+            const conversationSyncSenderId = newMessageId('tab');
+            let conversationSyncChannel = null;
+
+            function broadcastConversationSnapshot(snapshot, preferredActiveId = null) {
+                if (!conversationSyncChannel) return;
+                try {
+                    conversationSyncChannel.postMessage({
+                        type: 'conversation-sync',
+                        senderId: conversationSyncSenderId,
+                        activeId: preferredActiveId || activeId || '',
+                        convs: snapshot && typeof snapshot === 'object' ? snapshot : {}
+                    });
+                } catch (error) {
+                    console.warn('[Sync] Falha ao publicar snapshot entre abas:', error);
+                }
+            }
+
+            function bindConversationStorageSync() {
+                if (conversationStorageSyncBound) return;
+                conversationStorageSyncBound = true;
+                if (typeof BroadcastChannel !== 'undefined') {
+                    try {
+                        conversationSyncChannel = new BroadcastChannel('skillflow-chat-conversations');
+                        conversationSyncChannel.onmessage = (event) => {
+                            const payload = event?.data;
+                            if (!payload || payload.type !== 'conversation-sync') return;
+                            if (payload.senderId === conversationSyncSenderId) return;
+                            applyStoredConversationSnapshot(JSON.stringify(payload.convs || {}), payload.activeId || null);
+                        };
+                    } catch (error) {
+                        conversationSyncChannel = null;
+                        console.warn('[Sync] BroadcastChannel indisponivel:', error);
+                    }
+                }
+                window.addEventListener('storage', (event) => {
+                    if (event.storageArea !== localStorage) return;
+                    if (event.key === 'gc_convs') {
+                        applyStoredConversationSnapshot(event.newValue || '{}');
+                        return;
+                    }
+                    if (event.key === 'gc_activeId' && (!activeId || !convs[activeId])) {
+                        activeId = selectBestActiveConversationId(event.newValue || null);
+                        renderSidebar();
+                        renderChat();
+                    }
+                });
+            }
+
             function saveConvs() {
+                const storedConversations = parseStoredConversationMap(localStorage.getItem('gc_convs') || '{}');
+                convs = mergeConversationMaps(convs, storedConversations);
                 const compacted = compactConversationsForStorage(convs);
+                convs = compacted;
                 const saved = setStorageItem('gc_convs', JSON.stringify(compacted), {
                     silent: true
                 });
+                setStorageItem('gc_activeId', activeId || '', { silent: true });
+                broadcastConversationSnapshot(compacted, activeId || null);
                 if (!saved) {
                     toast('⚠ Armazenamento local cheio. O navegador reduziu o histórico salvo.');
                 }
+            }
+            const chatJobPolls = new Map();
+
+            async function requestChatJob(payload, signal) {
+                const res = await fetch('/api/chat/jobs', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                    signal
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(data.error || (`HTTP ${res.status}`));
+                return data.job || null;
+            }
+
+            async function fetchChatJobSnapshot(jobId, signal) {
+                const res = await fetch(`/api/chat/jobs/${encodeURIComponent(jobId)}`, {
+                    cache: 'no-store',
+                    signal
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(data.error || (`HTTP ${res.status}`));
+                return data;
+            }
+
+            function sleepWithSignal(ms, signal) {
+                return new Promise((resolve, reject) => {
+                    const timer = setTimeout(() => {
+                        if (signal) signal.removeEventListener('abort', onAbort);
+                        resolve();
+                    }, ms);
+                    function onAbort() {
+                        clearTimeout(timer);
+                        reject(new DOMException('Aborted', 'AbortError'));
+                    }
+                    if (signal) {
+                        if (signal.aborted) {
+                            onAbort();
+                            return;
+                        }
+                        signal.addEventListener('abort', onAbort, { once: true });
+                    }
+                });
+            }
+
+            function parseGeminiJobSnapshot(rawSse) {
+                let full = '', tok = 0, sig = '';
+                const fnCallParts = [];
+                const lines = String(rawSse || '').split('\n');
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    const raw = line.slice(6).trim();
+                    if (!raw || raw === '[DONE]') continue;
+                    try {
+                        const parsed = JSON.parse(raw);
+                        for (const part of (parsed.candidates?.[0]?.content?.parts || [])) {
+                            if (part.text) full += part.text;
+                            if (part.thoughtSignature && !part.functionCall) sig = part.thoughtSignature;
+                            if (part.functionCall) fnCallParts.push({ ...part });
+                        }
+                        if (parsed.usageMetadata?.totalTokenCount) tok = parsed.usageMetadata.totalTokenCount;
+                    } catch (_) { }
+                }
+                return { full, tok, sig, fnCallParts };
+            }
+
+            function updateMessageChatJob(convId, msgIndex, patch = {}, saveNow = true) {
+                const message = convs?.[convId]?.msgs?.[msgIndex];
+                if (!message || message.role !== 'model') return null;
+                message.chatJob = {
+                    ...(message.chatJob && typeof message.chatJob === 'object' ? message.chatJob : {}),
+                    ...patch
+                };
+                if (saveNow) saveConvs();
+                return message;
+            }
+
+            function getConversationMessage(convId, msgIndex) {
+                return convs?.[convId]?.msgs?.[msgIndex] || null;
+            }
+
+            const messageRevealAnimations = new Map();
+
+            function messageRevealKey(convId, msgIndex) {
+                return `${convId || 'conv'}:${msgIndex}`;
+            }
+
+            function renderStreamingText(text) {
+                const safe = esc(String(text || '')).replace(/\n/g, '<br>');
+                return `<p>${safe || '&nbsp;'}</p>`;
+            }
+
+            function stopMessageReveal(convId, msgIndex) {
+                const key = messageRevealKey(convId, msgIndex);
+                const state = messageRevealAnimations.get(key);
+                if (state?.rafId) {
+                    try { cancelAnimationFrame(state.rafId); } catch (_) { }
+                }
+                messageRevealAnimations.delete(key);
+            }
+
+            function revealMessageText(convId, msgIndex, targetText, options = {}) {
+                if (activeId !== convId) return;
+                const key = messageRevealKey(convId, msgIndex);
+                const target = String(targetText || '');
+                const final = !!options.final;
+                const renderFinal = typeof options.renderFinal === 'function'
+                    ? options.renderFinal
+                    : (text) => renderMarkdown(text);
+
+                let state = messageRevealAnimations.get(key);
+                if (!state) {
+                    state = {
+                        shown: '',
+                        target: '',
+                        final: false,
+                        renderFinal,
+                        running: false,
+                        rafId: 0
+                    };
+                    messageRevealAnimations.set(key, state);
+                }
+
+                state.target = target;
+                state.final = final;
+                state.renderFinal = renderFinal;
+                if (!target.startsWith(state.shown)) {
+                    state.shown = '';
+                }
+
+                if (state.running) return;
+                state.running = true;
+
+                const step = () => {
+                    const bubble = document.getElementById(`bb${msgIndex}`);
+                    if (!bubble || activeId !== convId) {
+                        state.running = false;
+                        state.rafId = 0;
+                        return;
+                    }
+
+                    const remaining = state.target.length - state.shown.length;
+                    if (remaining <= 0) {
+                        bubble.innerHTML = state.final
+                            ? state.renderFinal(state.target)
+                            : renderStreamingText(state.shown);
+                        state.running = false;
+                        state.rafId = 0;
+                        if (state.final) messageRevealAnimations.delete(key);
+                        scrollEnd();
+                        return;
+                    }
+
+                    const stepSize = Math.max(1, Math.min(remaining, Math.ceil(Math.max(state.target.length / 90, 6))));
+                    state.shown = state.target.slice(0, state.shown.length + stepSize);
+                    bubble.innerHTML = renderStreamingText(state.shown);
+                    scrollEnd();
+                    state.rafId = requestAnimationFrame(step);
+                };
+
+                state.rafId = requestAnimationFrame(step);
+            }
+
+            function updateVisibleJobBubble(convId, msgIndex, html) {
+                if (activeId !== convId) return;
+                const bubble = document.getElementById(`bb${msgIndex}`);
+                if (!bubble) return;
+                bubble.innerHTML = html;
+                scrollEnd();
+            }
+
+            async function waitForChatJob(jobId, options = {}) {
+                const existing = chatJobPolls.get(jobId);
+                if (existing) return existing;
+
+                const runner = (async () => {
+                    while (true) {
+                        const snapshot = await fetchChatJobSnapshot(jobId, options.signal);
+                        if (typeof options.onSnapshot === 'function') options.onSnapshot(snapshot);
+
+                        const status = snapshot?.job?.status || '';
+                        if (status === 'completed' || status === 'failed') return snapshot;
+                        await sleepWithSignal(options.pollMs || 250, options.signal);
+                    }
+                })();
+
+                chatJobPolls.set(jobId, runner);
+                try {
+                    return await runner;
+                } finally {
+                    chatJobPolls.delete(jobId);
+                }
+            }
+
+            function applyChatJobSnapshotToMessage(convId, msgIndex, snapshot) {
+                const message = convs?.[convId]?.msgs?.[msgIndex];
+                if (!message || message.role !== 'model') return;
+
+                const provider = snapshot?.job?.provider || message?.chatJob?.provider || '';
+                const status = snapshot?.job?.status || message?.chatJob?.status || 'running';
+                const errorMessage = snapshot?.job?.error?.message || '';
+                let visibleHtml = '';
+                let needsFullRender = false;
+
+                if (provider === 'gemini') {
+                    const parsed = parseGeminiJobSnapshot(snapshot?.raw_sse || '');
+                    if (parsed.full) {
+                        message.text = parsed.full;
+                        visibleHtml = renderMarkdown(parsed.full);
+                    }
+                    if (parsed.tok) message.tok = parsed.tok;
+                    if (parsed.sig) message.sig = parsed.sig;
+                    if (status === 'failed') {
+                        message.text = message.text || `[Falha: ${errorMessage || 'Falha ao executar o job Gemini no backend.'}]`;
+                        visibleHtml = `<p style="color:var(--danger);font-style:italic">${esc(errorMessage || 'Falha ao executar o job Gemini no backend.')}</p>`;
+                        pushMessageTraceOnce(message, createTraceStep('error', {
+                            title: 'Falha',
+                            body: errorMessage || 'Falha ao executar o job Gemini no backend.'
+                        }));
+                        needsFullRender = true;
+                    } else if (status === 'completed' && !parsed.full) {
+                        if (parsed.fnCallParts.length) {
+                            message.text = message.text || '[A chamada do modelo foi retomada, mas ainda faltou continuar as tools no cliente.]';
+                            visibleHtml = `<p style="color:var(--muted);font-style:italic">A resposta foi retomada, mas ainda há tools pendentes para continuar no cliente.</p>`;
+                            pushMessageTraceOnce(message, createTraceStep('pending_tools', {
+                                title: 'Tools pendentes',
+                                body: `A retomada encontrou ${parsed.fnCallParts.length} function call(s) que ainda dependem do cliente.`
+                            }));
+                        } else {
+                            message.text = message.text || '[Resposta vazia — o modelo nao retornou texto visivel.]';
+                            visibleHtml = `<p style="color:var(--muted);font-style:italic">O modelo concluiu sem texto visivel.</p>`;
+                            pushMessageTraceOnce(message, createTraceStep('final', {
+                                title: 'Resposta vazia',
+                                body: 'O modelo concluiu a chamada sem texto visivel.'
+                            }));
+                        }
+                        needsFullRender = true;
+                    }
+                } else if (provider === 'codex') {
+                    const payload = snapshot?.result?.payload || {};
+                    if (payload.output_text) {
+                        message.text = payload.output_text;
+                        visibleHtml = renderMarkdown(payload.output_text);
+                    }
+                    const totalTokens = payload.usage?.total_tokens ?? payload.usage?.output_tokens ?? 0;
+                    if (totalTokens) message.tok = totalTokens;
+                    if (snapshot?.result?.auth) persistCodexAuth(snapshot.result.auth);
+                    if (status === 'failed') {
+                        message.text = message.text || `[Falha: ${errorMessage || 'Falha ao executar o job Codex no backend.'}]`;
+                        visibleHtml = `<p style="color:var(--danger);font-style:italic">${esc(errorMessage || 'Falha ao executar o job Codex no backend.')}</p>`;
+                        pushMessageTraceOnce(message, createTraceStep('error', {
+                            title: 'Falha',
+                            body: errorMessage || 'Falha ao executar o job Codex no backend.'
+                        }));
+                        needsFullRender = true;
+                    } else if (status === 'completed' && !payload.output_text) {
+                        message.text = message.text || '[Resposta vazia — o Codex nao retornou texto visivel.]';
+                        visibleHtml = `<p style="color:var(--muted);font-style:italic">O Codex concluiu sem texto visivel.</p>`;
+                        pushMessageTraceOnce(message, createTraceStep('final', {
+                            title: 'Resposta vazia',
+                            body: 'O Codex concluiu a chamada sem texto visivel.'
+                        }));
+                        needsFullRender = true;
+                    }
+                }
+
+                updateMessageChatJob(convId, msgIndex, {
+                    id: snapshot?.job?.id || message?.chatJob?.id,
+                    provider,
+                    status,
+                    finishedAt: snapshot?.job?.finished_at || null,
+                    updatedAt: snapshot?.job?.updated_at || Date.now(),
+                    error: snapshot?.job?.error || null
+                }, false);
+                if (activeId === convId) {
+                    if (status === 'completed' || status === 'failed' || needsFullRender) {
+                        renderChat();
+                        if (provider === 'gemini' && message.text && status === 'completed') {
+                            revealMessageText(convId, msgIndex, message.text, { final: true });
+                        }
+                    } else if (visibleHtml) {
+                        updateVisibleJobBubble(convId, msgIndex, visibleHtml);
+                    }
+                }
+                saveConvs();
+            }
+
+            function buildGeminiRequestFromMessages(messages, options = {}) {
+                const msgList = Array.isArray(messages) ? messages : [];
+                const MAX_IMG_TURNS = 3;
+                const imgMsgIndices = new Set(
+                    msgList.reduce((acc, m, i) => {
+                        if (m?.imgs?.length || m?.files?.length) acc.push(i);
+                        return acc;
+                    }, []).slice(-MAX_IMG_TURNS)
+                );
+
+                const contents = msgList.map((m, i) => {
+                    const parts = [];
+                    const hasImgs = m.imgs?.length > 0;
+                    const hasFiles = m.files?.length > 0;
+                    const imagePayloads = hasImgs ? m.imgs.filter(img => img?.data) : [];
+                    const filePayloads = hasFiles ? m.files.filter(f => f?.data) : [];
+                    const attachmentRefs = buildAttachmentReferenceText(m.imgs || [], m.files || []);
+
+                    if ((hasImgs || hasFiles) && imgMsgIndices.has(i)) {
+                        if (m.text) parts.push({ text: m.text });
+                        if (attachmentRefs) parts.push({ text: attachmentRefs });
+                        if (imagePayloads.length) imagePayloads.forEach(img => {
+                            parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
+                        });
+                        if (filePayloads.length) filePayloads.forEach(f => {
+                            parts.push({ inlineData: { mimeType: f.mimeType, data: f.data } });
+                        });
+                        if (!imagePayloads.length && !filePayloads.length) {
+                            const count = (m.imgs?.length || 0) + (m.files?.length || 0);
+                            parts.push({ text: `[${count} arquivo(s) salvo(s) no workspace do usuário]` });
+                        }
+                    } else if ((hasImgs || hasFiles) && !imgMsgIndices.has(i)) {
+                        const count = (m.imgs?.length || 0) + (m.files?.length || 0);
+                        const note = `[${count} arquivo(s) enviado(s) — omitido(s) do contexto]`;
+                        parts.push({ text: (m.text ? m.text + '\n' : '') + note + (attachmentRefs ? '\n' + attachmentRefs : '') });
+                    } else {
+                        if (m.text) parts.push({ text: m.text });
+                    }
+
+                    if (m.sig && parts[0]) parts[0].thoughtSignature = m.sig;
+                    return { role: m.role === 'model' ? 'model' : 'user', parts };
+                }).filter(item => Array.isArray(item.parts) && item.parts.length);
+
+                const genCfg = {
+                    temperature: options.temperature,
+                    topP: options.topP,
+                    topK: options.topK,
+                    maxOutputTokens: options.maxOutputTokens
+                };
+                if (supportsThinking(options.model) && options.think) {
+                    genCfg.thinkingConfig = { thinkingLevel: options.think };
+                }
+
+                const MAX_CTX_TURNS = 40;
+                const trimmedContents = contents.length > MAX_CTX_TURNS
+                    ? contents.slice(-MAX_CTX_TURNS)
+                    : contents;
+
+                const body = { contents: trimmedContents, generationConfig: genCfg, tools: buildTools() };
+                const hasTools = body.tools?.length > 0 || body.tools?.[0]?.functionDeclarations?.length > 0;
+                const skillsInstruction = hasTools
+                    ? '\n\n[REGRA OPERACIONAL] Você tem ferramentas (skills) disponíveis. SEMPRE verifique se alguma skill resolve a pergunta ANTES de responder com texto. Use function calling em vez de verbalizar ações. Só responda verbalmente se nenhuma skill for adequada.'
+                    : '';
+                const fullSysp = (options.systemPrompt || '') + skillsInstruction;
+                if (fullSysp.trim()) body.systemInstruction = { parts: [{ text: fullSysp }] };
+                return body;
+            }
+
+            function rebuildPendingChatRequest(convId, msgIndex) {
+                const conversation = convs?.[convId];
+                const message = conversation?.msgs?.[msgIndex];
+                const job = message?.chatJob;
+                const resumeState = job?.resumeState;
+                if (!conversation || !message || message.role !== 'model' || !resumeState) return null;
+
+                const historyMessages = conversation.msgs.slice(0, msgIndex);
+                if (resumeState.provider === 'codex') {
+                    return {
+                        provider: 'codex',
+                        auth: resumeState.auth,
+                        model: resumeState.model,
+                        reasoning: resumeState.reasoning,
+                        instructions: resumeState.instructions || '',
+                        input: buildCodexInputFromMessages(historyMessages),
+                        tools: buildCodexTools()
+                    };
+                }
+
+                return {
+                    provider: 'gemini',
+                    model: resumeState.model,
+                    request: buildGeminiRequestFromMessages(historyMessages, {
+                        model: resumeState.model,
+                        think: resumeState.think,
+                        temperature: resumeState.temperature,
+                        topP: resumeState.topP,
+                        topK: resumeState.topK,
+                        maxOutputTokens: resumeState.maxOutputTokens,
+                        systemPrompt: resumeState.systemPrompt || ''
+                    }),
+                    api_key: resumeState.apiKey || undefined
+                };
+            }
+
+            function resumePendingChatJobs() {
+                Object.entries(convs || {}).forEach(([convId, conversation]) => {
+                    const msgs = Array.isArray(conversation?.msgs) ? conversation.msgs : [];
+                    msgs.forEach((message, msgIndex) => {
+                        const job = message?.chatJob;
+                        if (!job) return;
+                        if (job.status === 'completed' || job.status === 'failed') return;
+                        const rebuiltRequest = !job.id && !job.pendingRequest
+                            ? rebuildPendingChatRequest(convId, msgIndex)
+                            : null;
+                        const ensureJob = job.id
+                            ? Promise.resolve(job.id)
+                            : (job.pendingRequest
+                                ? requestChatJob(job.pendingRequest).then(createdJob => {
+                                    updateMessageChatJob(convId, msgIndex, {
+                                        id: createdJob?.id || null,
+                                        status: createdJob?.status || 'running',
+                                        startedAt: createdJob?.created_at || Date.now(),
+                                        pendingRequest: null,
+                                        error: null
+                                    });
+                                    return createdJob?.id || null;
+                                })
+                                : (rebuiltRequest
+                                    ? requestChatJob(rebuiltRequest).then(createdJob => {
+                                        updateMessageChatJob(convId, msgIndex, {
+                                            id: createdJob?.id || null,
+                                            status: createdJob?.status || 'running',
+                                            startedAt: createdJob?.created_at || Date.now(),
+                                            pendingRequest: null,
+                                            error: null
+                                        });
+                                        return createdJob?.id || null;
+                                    })
+                                    : Promise.resolve(null)));
+                        ensureJob.then(jobId => {
+                            if (!jobId) {
+                                if (message?.role === 'model') {
+                                    message.text = message.text || '[Falha: nao foi possivel retomar esta resposta automaticamente.]';
+                                    pushMessageTraceOnce(message, createTraceStep('error', {
+                                        title: 'Retomada indisponivel',
+                                        body: 'Nao foi possivel reconstruir ou localizar o job de chat salvo.'
+                                    }));
+                                }
+                                updateMessageChatJob(convId, msgIndex, {
+                                    status: 'failed',
+                                    finishedAt: Date.now(),
+                                    error: { message: 'Nao foi possivel retomar esta resposta automaticamente.' }
+                                });
+                                if (activeId === convId) renderChat();
+                                return;
+                            }
+                            return waitForChatJob(jobId, {
+                            onSnapshot(snapshot) {
+                                applyChatJobSnapshotToMessage(convId, msgIndex, snapshot);
+                            }
+                            });
+                        }).catch(error => {
+                            if (message?.role === 'model') {
+                                message.text = message.text || `[Falha: ${error.message || 'Falha ao retomar job de chat.'}]`;
+                                pushMessageTraceOnce(message, createTraceStep('error', {
+                                    title: 'Falha na retomada',
+                                    body: error.message || 'Falha ao retomar job de chat.'
+                                }));
+                            }
+                            updateMessageChatJob(convId, msgIndex, {
+                                status: 'failed',
+                                finishedAt: Date.now(),
+                                error: { message: error.message || 'Falha ao retomar job de chat.' }
+                            });
+                            if (activeId === convId) renderChat();
+                        });
+                    });
+                });
             }
             function newConversation() {
                 // Prevent creating multiple empty conversations
@@ -5304,7 +6111,13 @@ return item;`
                 convs[id] = { uid: newConversationUid(), title: 'Nova Conversa', msgs: [], ts: Date.now() };
                 saveConvs(); setActive(id);
             }
-            function setActive(id) { activeId = id; renderSidebar(); renderChat(); if (window.innerWidth <= 768) closeSidebar(); }
+            function setActive(id) {
+                activeId = id;
+                saveConvs();
+                renderSidebar();
+                renderChat();
+                if (window.innerWidth <= 768) closeSidebar();
+            }
             function delConv(id, e) {
                 e.stopPropagation();
                 delete convs[id]; saveConvs();
@@ -5639,7 +6452,7 @@ return item;`
                 }
 
                 if (m.role === 'model') {
-                    body += renderMarkdown(m.text || '');
+                    body += `<div class="msg-render-text" id="bb${i}">${renderMarkdown(m.text || '')}</div>`;
                     body += traceHtml;
                 } else {
                     body += `<p>${esc(m.text || '').replace(/\n/g, '<br>')}</p>`;
@@ -5812,10 +6625,11 @@ return item;`
                     }
 
                     // Log user text message
-                    const msgData = { role: 'user', text, ts: Date.now(), live: true };
+                    const msgData = { id: newMessageId('msg'), role: 'user', text, ts: Date.now(), live: true };
                     if (imgsToSave.length) msgData.imgs = imgsToSave;
                     if (filesToSave.length) msgData.files = filesToSave;
                     convs[activeId].msgs.push(msgData);
+                    convs[activeId].ts = msgData.ts;
                     if (convs[activeId].msgs.length === 1) {
                         convs[activeId].title = text
                             ? text.slice(0, 48) + (text.length > 48 ? '…' : '')
@@ -5855,8 +6669,16 @@ return item;`
                     toast('⚠ ' + err.message);
                     return;
                 }
-                if (!usingCodex && !apiKey) { toast('⚠ Insira sua API Key!'); return; }
                 if (usingCodex && !codexAuth) { toast('⚠ Cole a credencial do Codex!'); return; }
+
+                const think = document.getElementById('think-lvl').value;
+                const effectiveThink = usingCodex ? normalizeCodexReasoning(think) : think;
+                const isThinking = (supportsThinking(model) && !!think) || (usingCodex && !!effectiveThink);
+                const temp = parseFloat(document.getElementById('temp').value);
+                const topp = parseFloat(document.getElementById('topp').value);
+                const topk = parseInt(document.getElementById('topk').value);
+                const maxt = parseInt(document.getElementById('maxt').value);
+                const sysp = document.getElementById('sysp').value.trim();
 
                 input.value = ''; autoH(input);
 
@@ -5866,42 +6688,54 @@ return item;`
                 pendingFiles = [];
                 renderImagePreview();
 
-                try {
-                    imgsToSave = await persistPendingAttachments(imgsToSave, 'images');
-                    filesToSave = await persistPendingAttachments(filesToSave, 'files');
-                } catch (error) {
-                    pendingImages = imgsToSave;
-                    pendingFiles = filesToSave;
-                    renderImagePreview();
-                    toast('⚠ Falha ao salvar anexos do usuário: ' + (error.message || 'erro desconhecido'));
-                    return;
-                }
-
-                const msgData = { role: 'user', text, imgs: imgsToSave, ts: Date.now() };
-                if (filesToSave.length) msgData.files = filesToSave;
+                const msgData = { id: newMessageId('msg'), role: 'user', text, ts: Date.now() };
+                if (imgsToSave.length) msgData.imgs = imgsToSave.map(item => ({ ...item }));
+                if (filesToSave.length) msgData.files = filesToSave.map(item => ({ ...item }));
                 convs[activeId].msgs.push(msgData);
+                convs[activeId].ts = msgData.ts;
                 if (convs[activeId].msgs.length === 1)
-                    convs[activeId].title = text ? text.slice(0, 48) + (text.length > 48 ? '…' : '') : (imgsToSave.length ? 'Imagem enviada' : filesToSave[0]?.name || 'Arquivo enviado');
-                saveConvs(); renderSidebar();
-
-                const chat = document.getElementById('chat');
-                document.getElementById('empty')?.remove();
-                chat.insertAdjacentHTML('beforeend', msgHTML(convs[activeId].msgs.at(-1), convs[activeId].msgs.length - 1));
-
-                const think = document.getElementById('think-lvl').value;
-                const effectiveThink = usingCodex ? normalizeCodexReasoning(think) : think;
-                const isThinking = (supportsThinking(model) && !!think) || (usingCodex && !!effectiveThink);
-
-                const tid = 't' + Date.now();
-                chat.insertAdjacentHTML('beforeend',
-                    isThinking
-                        ? `<div id="${tid}" class="row model animate-in"><div class="av">✦</div>
-     <div style="flex:1;max-width:calc(100% - 42px)">
-       <div class="thinking-indicator"><span class="brain">🧠</span> Pensando<span class="thinking-dots"><span></span><span></span><span></span></span></div>
-       <div class="skeleton-lines"><div class="skeleton-line" style="width:85%"></div><div class="skeleton-line" style="width:60%"></div><div class="skeleton-line" style="width:72%"></div></div>
-     </div></div>`
-                        : `<div id="${tid}" class="row model animate-in"><div class="av">✦</div>
-     <div class="typing"><span></span><span></span><span></span></div></div>`);
+                    convs[activeId].title = text ? text.slice(0, 48) + (text.length > 48 ? '…' : '') : (msgData.imgs?.length ? 'Imagem enviada' : msgData.files?.[0]?.name || 'Arquivo enviado');
+                let mi = convs[activeId].msgs.length;
+                convs[activeId].msgs.push({
+                    id: newMessageId('msg'),
+                    role: 'model',
+                    text: '',
+                    ts: Date.now(),
+                    model,
+                    think: isThinking ? effectiveThink : undefined,
+                    trace: isThinking
+                        ? [createTraceStep('thinking', { title: 'Thinking', meta: `level=${effectiveThink}` })]
+                        : [],
+                    chatJob: {
+                        provider: usingCodex ? 'codex' : 'gemini',
+                        status: 'preparing',
+                        recoverable: true,
+                        resumeState: usingCodex
+                            ? {
+                                provider: 'codex',
+                                auth: codexAuth,
+                                model,
+                                reasoning: effectiveThink,
+                                instructions: sysp
+                            }
+                            : {
+                                provider: 'gemini',
+                                apiKey: apiKey || '',
+                                model,
+                                think,
+                                temperature: temp,
+                                topP: topp,
+                                topK: topk,
+                                maxOutputTokens: maxt,
+                                systemPrompt: sysp
+                            },
+                        error: null
+                    }
+                });
+                convs[activeId].ts = Date.now();
+                saveConvs();
+                renderSidebar();
+                renderChat();
                 scrollEnd();
 
                 const requestId = ++generationSeq;
@@ -5909,165 +6743,137 @@ return item;`
                 generationControllers.set(requestId, requestCtrl);
                 refreshGenerationUi();
 
-                const temp = parseFloat(document.getElementById('temp').value);
-                const topp = parseFloat(document.getElementById('topp').value);
-                const topk = parseInt(document.getElementById('topk').value);
-                const maxt = parseInt(document.getElementById('maxt').value);
-                const sysp = document.getElementById('sysp').value.trim();
-
-                // Only include image data for the last MAX_IMG_TURNS turns that have images.
-                const MAX_IMG_TURNS = 3;
-                const msgList = convs[activeId].msgs;
-                const imgMsgIndices = new Set(
-                    msgList.reduce((acc, m, i) => { if (m.imgs?.length || m.files?.length) acc.push(i); return acc; }, [])
-                        .slice(-MAX_IMG_TURNS)
-                );
-
-                const contents = msgList.map((m, i) => {
-                    const parts = [];
-                    const hasImgs = m.imgs?.length > 0;
-                    const hasFiles = m.files?.length > 0;
-                    const imagePayloads = hasImgs ? m.imgs.filter(img => img?.data) : [];
-                    const filePayloads = hasFiles ? m.files.filter(f => f?.data) : [];
-                    const attachmentRefs = buildAttachmentReferenceText(m.imgs || [], m.files || []);
-
-                    if ((hasImgs || hasFiles) && imgMsgIndices.has(i)) {
-                        if (m.text) parts.push({ text: m.text });
-                        if (attachmentRefs) parts.push({ text: attachmentRefs });
-                        if (imagePayloads.length) imagePayloads.forEach(img => {
-                            parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
-                        });
-                        if (filePayloads.length) filePayloads.forEach(f => {
-                            parts.push({ inlineData: { mimeType: f.mimeType, data: f.data } });
-                        });
-                        if (!imagePayloads.length && !filePayloads.length) {
-                            const count = (m.imgs?.length || 0) + (m.files?.length || 0);
-                            parts.push({ text: `[${count} arquivo(s) salvo(s) no workspace do usuário]` });
-                        }
-                    } else if ((hasImgs || hasFiles) && !imgMsgIndices.has(i)) {
-                        const count = (m.imgs?.length || 0) + (m.files?.length || 0);
-                        const note = `[${count} arquivo(s) enviado(s) — omitido(s) do contexto]`;
-                        parts.push({ text: (m.text ? m.text + '\n' : '') + note + (attachmentRefs ? '\n' + attachmentRefs : '') });
-                    } else {
-                        if (m.text) parts.push({ text: m.text });
-                    }
-
-                    if (m.sig && parts[0]) parts[0].thoughtSignature = m.sig;
-                    return { role: m.role === 'model' ? 'model' : 'user', parts };
-                }).filter(item => Array.isArray(item.parts) && item.parts.length);
-
-                const genCfg = { temperature: temp, topP: topp, topK: topk, maxOutputTokens: maxt };
-                if (supportsThinking(model) && think) genCfg.thinkingConfig = { thinkingLevel: think };
-
-                const MAX_CTX_TURNS = 40;
-                const trimmedContents = contents.length > MAX_CTX_TURNS
-                    ? contents.slice(-MAX_CTX_TURNS)
-                    : contents;
-
-                const body = { contents: trimmedContents, generationConfig: genCfg, tools: buildTools() };
-                const hasTools = body.tools?.length > 0 || body.tools?.[0]?.functionDeclarations?.length > 0;
-                const skillsInstruction = hasTools
-                    ? '\n\n[REGRA OPERACIONAL] Você tem ferramentas (skills) disponíveis. SEMPRE verifique se alguma skill resolve a pergunta ANTES de responder com texto. Use function calling em vez de verbalizar ações. Só responda verbalmente se nenhuma skill for adequada.'
-                    : '';
-                const fullSysp = (sysp || '') + skillsInstruction;
-                if (fullSysp.trim()) body.systemInstruction = { parts: [{ text: fullSysp }] };
-
                 const thinkTimeout = isThinking ? 180000 : 60000;
                 const autoAbort = setTimeout(() => {
-                    if (generationControllers.has(requestId)) requestCtrl.abort();
+                    if (generationControllers.has(requestId)) {
+                        requestCtrl._stopReason = 'timeout';
+                        requestCtrl.abort();
+                    }
                 }, thinkTimeout);
-                let mi = null;
                 try {
+                    imgsToSave = await persistPendingAttachments(imgsToSave, 'images');
+                    filesToSave = await persistPendingAttachments(filesToSave, 'files');
+                    if (imgsToSave.length) msgData.imgs = imgsToSave;
+                    else delete msgData.imgs;
+                    if (filesToSave.length) msgData.files = filesToSave;
+                    else delete msgData.files;
+                    saveConvs();
+                    renderChat();
+
+                    const body = buildGeminiRequestFromMessages(convs[activeId].msgs.slice(0, mi), {
+                        model,
+                        think,
+                        temperature: temp,
+                        topP: topp,
+                        topK: topk,
+                        maxOutputTokens: maxt,
+                        systemPrompt: sysp
+                    });
+                    const getCurrentModelMsg = () => getConversationMessage(activeId, mi);
+                    const bub = document.getElementById(`bb${mi}`);
 
                     async function callAPI(reqBody, bubEl, depth) {
                         depth = depth || 0;
-                        const r = await fetch(
-                            `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`,
-                            {
-                                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify(reqBody), signal: requestCtrl.signal
+                        updateMessageChatJob(activeId, mi, {
+                            provider: 'gemini',
+                            status: 'starting',
+                            pendingRequest: {
+                                provider: 'gemini',
+                                model,
+                                request: reqBody,
+                                api_key: apiKey || undefined
+                            },
+                            error: null
+                        });
+                        const job = await requestChatJob({
+                            provider: 'gemini',
+                            model,
+                            request: reqBody,
+                            api_key: apiKey || undefined
+                        }, requestCtrl.signal);
+                        if (!job?.id) throw new Error('Falha ao iniciar o job Gemini no backend.');
+
+                        updateMessageChatJob(activeId, mi, {
+                            id: job.id,
+                            provider: 'gemini',
+                            status: job.status || 'running',
+                            startedAt: job.created_at || Date.now(),
+                            pendingRequest: null
+                        });
+
+                        let parsedSnapshot = { full: '', tok: 0, sig: '', fnCallParts: [] };
+                        const snapshot = await waitForChatJob(job.id, {
+                            signal: requestCtrl.signal,
+                            pollMs: 250,
+                            onSnapshot(data) {
+                                parsedSnapshot = parseGeminiJobSnapshot(data?.raw_sse || '');
+                                const currentMsg = convs?.[activeId]?.msgs?.[mi];
+                                if (!currentMsg) return;
+
+                                updateMessageChatJob(activeId, mi, {
+                                    id: job.id,
+                                    provider: 'gemini',
+                                    status: data?.job?.status || 'running',
+                                    updatedAt: data?.job?.updated_at || Date.now(),
+                                    error: data?.job?.error || null
+                                }, false);
+
+                                if (parsedSnapshot.full && currentMsg.text !== parsedSnapshot.full) {
+                                    currentMsg.text = parsedSnapshot.full;
+                                    if (parsedSnapshot.tok) currentMsg.tok = parsedSnapshot.tok;
+                                    if (parsedSnapshot.sig) currentMsg.sig = parsedSnapshot.sig;
+                                    saveConvs();
+                                }
+
+                                if (parsedSnapshot.full && !parsedSnapshot.fnCallParts.length) {
+                                    revealMessageText(activeId, mi, parsedSnapshot.full);
+                                }
                             }
-                        );
-                        if (!r.ok) {
-                            let em = `HTTP ${r.status}`;
-                            try { const e = await r.json(); em = e.error?.message || em; } catch (_) { }
-                            // Specific error messages
-                            if (r.status === 429) em = '⏱ Rate limit excedido. Aguarde alguns segundos e tente novamente.';
-                            else if (r.status === 403) em = '🔑 API Key inválida ou sem permissão para este modelo.';
-                            else if (r.status === 400) em = '⚠ Requisição inválida: ' + em;
-                            throw new Error(em);
+                        });
+
+                        updateMessageChatJob(activeId, mi, {
+                            id: job.id,
+                            provider: 'gemini',
+                            status: snapshot?.job?.status || 'completed',
+                            finishedAt: snapshot?.job?.finished_at || Date.now(),
+                            error: snapshot?.job?.error || null
+                        });
+
+                        if (snapshot?.job?.status === 'failed') {
+                            throw new Error(snapshot?.job?.error?.message || 'Falha ao executar o job Gemini no backend.');
                         }
 
-                        // fnCallParts: array of parts {functionCall, thoughtSignature?} preserved exactly from API
-                        // textSig: thoughtSignature from text/thought parts (non-FC) — optional to send back
-                        let full = '', tok = 0, textSig = '', fnCallParts = [];
-                        const reader = r.body.getReader(), dec = new TextDecoder();
-                        let buf = '';
+                        const { full, tok, sig: textSig, fnCallParts } = parsedSnapshot;
 
-                        while (true) {
-                            const { done, value } = await reader.read();
-                            if (done) break;
-                            buf += dec.decode(value, { stream: true });
-                            const evtLines = buf.split('\n'); buf = evtLines.pop();
-                            for (const ln of evtLines) {
-                                if (!ln.startsWith('data: ')) continue;
-                                const raw = ln.slice(6).trim();
-                                if (raw === '[DONE]') continue;
-                                try {
-                                    const j = JSON.parse(raw);
-                                    for (const p of (j.candidates?.[0]?.content?.parts || [])) {
-                                        if (p.text) { full += p.text; }
-                                        // thoughtSignature on text/thought parts (non-FC) — optional, stored for next turn
-                                        if (p.thoughtSignature && !p.functionCall) textSig = p.thoughtSignature;
-                                        // Preserve each functionCall part EXACTLY as received (with its thoughtSignature)
-                                        // Gemini 3 REQUIRES thoughtSignature ON the functionCall part itself — mandatory 400 otherwise
-                                        if (p.functionCall) fnCallParts.push({ ...p });
-                                    }
-                                    if (j.usageMetadata?.totalTokenCount) tok = j.usageMetadata.totalTokenCount;
-                                    if (full && !fnCallParts.length) { bubEl.innerHTML = renderMarkdown(full); scrollEnd(); }
-                                } catch (e) { console.error('Stream parse:', e); }
-                            }
-                        }
-
-                        // ─ FUNCTION CALL(S): execute and re-request ─
-                        // Supports: parallel FCs, sequential multi-step, single FC — all Gemini 3 compliant
                         if (fnCallParts.length && depth < 6) {
                             fnCallParts.forEach(part => {
-                                pushToolCallTrace(currentModelMsg, {
+                                pushToolCallTrace(getCurrentModelMsg(), {
                                     name: part?.functionCall?.name,
                                     arguments: part?.functionCall?.args || {}
                                 });
                             });
-                            // Build visual indicator for all function calls
                             const callLabels = fnCallParts.map(p => {
                                 const args = p.functionCall.args || {};
                                 const argStr = Object.entries(args).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ');
                                 return `<code style="background:var(--s2);padding:2px 6px;border-radius:4px">${p.functionCall.name}(${argStr})</code>`;
                             }).join(' <span style="color:var(--muted)">+</span> ');
                             bubEl.innerHTML = `<div style="color:var(--accent2);font-size:13px;display:flex;align-items:center;gap:8px;padding:4px 0;flex-wrap:wrap">
-          <span style="display:inline-block;animation:bop 1s infinite">🔍</span>
-          <span>Chamando ${callLabels} …</span>
+          <span style="display:inline-block;animation:bop 1s infinite">&#128269;</span>
+          <span>Chamando ${callLabels} ...</span>
         </div>`;
                             scrollEnd();
 
-                            // Execute all function calls in parallel
                             const results = await Promise.all(
                                 fnCallParts.map(p => executePlugin(p.functionCall.name, p.functionCall.args || {}))
                             );
                             results.forEach((result, index) => {
-                                pushToolResultTrace(currentModelMsg, fnCallParts[index]?.functionCall?.name, result);
+                                pushToolResultTrace(getCurrentModelMsg(), fnCallParts[index]?.functionCall?.name, result);
                             });
                             const currentFiles = results.flatMap(result => extractToolArtifacts(result));
-
-                            // Model parts: send EXACTLY as received from API (thoughtSignature preserved per part)
-                            // CRITICAL for Gemini 3: thoughtSignature MUST stay on the functionCall part, NOT separate
                             const modelParts = fnCallParts;
-
-                            // All functionResponses in ONE user message (parallel FC requires no interleaving)
                             const frParts = fnCallParts.map((p, i) => ({
                                 functionResponse: { name: p.functionCall.name, response: results[i] }
                             }));
-
                             const updatedContents = [
                                 ...reqBody.contents,
                                 { role: 'model', parts: modelParts },
@@ -6082,32 +6888,6 @@ return item;`
 
                         return { full, tok, sig: textSig, files: [] };
                     }
-
-                    document.getElementById(tid)?.remove();
-                    mi = convs[activeId].msgs.length;
-                    convs[activeId].msgs.push({
-                        role: 'model', text: '', ts: Date.now(), model,
-                        think: isThinking ? effectiveThink : undefined,
-                        trace: isThinking
-                            ? [createTraceStep('thinking', { title: 'Thinking', meta: `level=${effectiveThink}` })]
-                            : []
-                    });
-                    const currentModelMsg = convs[activeId].msgs[mi];
-
-                    chat.insertAdjacentHTML('beforeend', `
-      <div id="mm${mi}" class="row model">
-        <div class="av">✦</div>
-        <div style="flex:1; max-width: calc(100% - 42px);">
-          <div class="bub" id="bb${mi}"></div>
-          <div class="meta" id="mt${mi}">
-            <span>${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>
-            <span style="color:var(--accent2)">${model}</span>
-            ${isThinking ? `<span class="tbadge">thinking:${effectiveThink}</span>` : ''}
-          </div>
-        </div>
-      </div>`);
-
-                    const bub = document.getElementById(`bb${mi}`);
                     let full = '';
                     let tok = 0;
                     let sig = '';
@@ -6115,15 +6895,70 @@ return item;`
                     const codexTools = usingCodex ? buildCodexTools() : [];
 
                     async function callCodexAPI(inputItems, depth) {
-                        const result = await requestCodexChat({
+                        updateMessageChatJob(activeId, mi, {
+                            provider: 'codex',
+                            status: 'starting',
+                            pendingRequest: {
+                                provider: 'codex',
+                                auth: codexAuth,
+                                model,
+                                reasoning: effectiveThink,
+                                instructions: sysp,
+                                input: inputItems,
+                                tools: codexTools
+                            },
+                            error: null
+                        });
+                        const job = await requestChatJob({
+                            provider: 'codex',
                             auth: codexAuth,
                             model,
                             reasoning: effectiveThink,
                             instructions: sysp,
                             input: inputItems,
-                            tools: codexTools,
-                            signal: requestCtrl.signal
+                            tools: codexTools
+                        }, requestCtrl.signal);
+                        if (!job?.id) throw new Error('Falha ao iniciar o job Codex no backend.');
+
+                        updateMessageChatJob(activeId, mi, {
+                            id: job.id,
+                            provider: 'codex',
+                            status: job.status || 'running',
+                            startedAt: job.created_at || Date.now(),
+                            pendingRequest: null
                         });
+
+                        const snapshot = await waitForChatJob(job.id, {
+                            signal: requestCtrl.signal,
+                            pollMs: 400,
+                            onSnapshot(data) {
+                                updateMessageChatJob(activeId, mi, {
+                                    id: job.id,
+                                    provider: 'codex',
+                                    status: data?.job?.status || 'running',
+                                    updatedAt: data?.job?.updated_at || Date.now(),
+                                    error: data?.job?.error || null
+                                }, false);
+                            }
+                        });
+
+                        updateMessageChatJob(activeId, mi, {
+                            id: job.id,
+                            provider: 'codex',
+                            status: snapshot?.job?.status || 'completed',
+                            finishedAt: snapshot?.job?.finished_at || Date.now(),
+                            error: snapshot?.job?.error || null
+                        });
+
+                        if (snapshot?.job?.status === 'failed') {
+                            throw new Error(snapshot?.job?.error?.message || 'Falha ao executar o job Codex no backend.');
+                        }
+
+                        const result = snapshot?.result || {};
+                        if (result.auth) {
+                            codexAuth = result.auth;
+                            persistCodexAuth(result.auth);
+                        }
 
                         const payload = result?.payload || {};
                         const toolCalls = Array.isArray(payload.tool_calls) ? payload.tool_calls : [];
@@ -6131,7 +6966,7 @@ return item;`
 
                         if (toolCalls.length) {
                             if (depth >= 6) throw new Error('Limite de function calls atingido para o Codex.');
-                            toolCalls.forEach(call => pushToolCallTrace(currentModelMsg, call));
+                            toolCalls.forEach(call => pushToolCallTrace(getCurrentModelMsg(), call));
 
                             const callLabels = toolCalls.map(call => {
                                 const args = call.arguments || {};
@@ -6140,8 +6975,8 @@ return item;`
                             }).join(' <span style="color:var(--muted)">+</span> ');
 
                             bub.innerHTML = `<div style="color:var(--accent2);font-size:13px;display:flex;align-items:center;gap:8px;padding:4px 0;flex-wrap:wrap">
-          <span style="display:inline-block;animation:bop 1s infinite">🔍</span>
-          <span>Chamando ${callLabels} …</span>
+          <span style="display:inline-block;animation:bop 1s infinite">&#128269;</span>
+          <span>Chamando ${callLabels} ...</span>
         </div>`;
                             scrollEnd();
 
@@ -6149,7 +6984,7 @@ return item;`
                                 toolCalls.map(call => executePlugin(call.name, call.arguments || {}))
                             );
                             results.forEach((result, index) => {
-                                pushToolResultTrace(currentModelMsg, toolCalls[index]?.name, result);
+                                pushToolResultTrace(getCurrentModelMsg(), toolCalls[index]?.name, result);
                             });
                             const currentFiles = results.flatMap(result => extractToolArtifacts(result));
                             const assistantToolItems = outputItems.length
@@ -6185,9 +7020,8 @@ return item;`
                             files: []
                         };
                     }
-
                     if (usingCodex) {
-                        const codexResult = await callCodexAPI(buildCodexInputFromMessages(convs[activeId].msgs), 0);
+                        const codexResult = await callCodexAPI(buildCodexInputFromMessages(convs[activeId].msgs.slice(0, mi)), 0);
                         full = codexResult.full || '';
                         tok = codexResult.tok || 0;
                         modelFiles = codexResult.files || [];
@@ -6222,7 +7056,7 @@ return item;`
                     if (tok) convs[activeId].msgs[mi].tok = tok;
                     if (sig) convs[activeId].msgs[mi].sig = sig;
                     if (Array.isArray(modelFiles) && modelFiles.length) convs[activeId].msgs[mi].files = modelFiles;
-                    pushMessageTrace(currentModelMsg, createTraceStep('final', {
+                    pushMessageTrace(getCurrentModelMsg(), createTraceStep('final', {
                         title: 'Resposta final',
                         meta: [
                             tok ? `${tok.toLocaleString()} tok` : '',
@@ -6235,6 +7069,7 @@ return item;`
                                 : 'Resposta sem texto visivel.')
                     }));
 
+                    stopMessageReveal(activeId, mi);
                     const mt = document.getElementById(`mt${mi}`);
                     if (mt) {
                         if (tok) mt.insertAdjacentHTML('beforeend', `<span>${tok.toLocaleString()} tok</span>`);
@@ -6247,12 +7082,20 @@ return item;`
                     renderChat();
 
                 } catch (err) {
-                    document.getElementById(tid)?.remove();
                     if (err.name === 'AbortError') {
                         toast('⏹ Geração interrompida.');
                         if (mi !== null) {
                             const abortedMsg = convs[activeId]?.msgs?.[mi];
-                            if (abortedMsg?.role === 'model' && !abortedMsg.text) convs[activeId].msgs.splice(mi, 1);
+                            const shouldDiscardPlaceholder = requestCtrl._stopReason === 'manual';
+                            if (abortedMsg?.role === 'model' && !abortedMsg.text && shouldDiscardPlaceholder) {
+                                convs[activeId].msgs.splice(mi, 1);
+                            } else if (abortedMsg?.role === 'model') {
+                                updateMessageChatJob(activeId, mi, {
+                                    status: shouldDiscardPlaceholder ? 'cancelled' : 'failed',
+                                    finishedAt: Date.now(),
+                                    error: shouldDiscardPlaceholder ? null : { message: 'Geração interrompida.' }
+                                }, false);
+                            }
                         }
                     } else {
                         const friendlyMsg = err.message?.includes('Failed to fetch')
@@ -6260,17 +7103,30 @@ return item;`
                             : err.message?.includes('timeout') || err.message?.includes('aborted')
                             ? '⏱ O modelo demorou para responder. Tente novamente ou reduza o Thinking Level.'
                             : err.message;
-                        chat.insertAdjacentHTML('beforeend', `
-        <div class="row model">
-          <div class="av" style="background:#4a0000; color: #fff;">⚠</div>
-          <div class="bub" style="border-color:var(--danger);color:var(--danger);display:flex;flex-direction:column;gap:8px">
-            <span>${esc(friendlyMsg)}</span>
-            <button class="retry-btn" onclick="send()">🔄 Tentar novamente</button>
-          </div>
-        </div>`);
+                        if (String(err.message || '').includes('Falha ao salvar')) {
+                            pendingImages = Array.isArray(msgData?.imgs) ? msgData.imgs.map(item => ({ ...item })) : [];
+                            pendingFiles = Array.isArray(msgData?.files) ? msgData.files.map(item => ({ ...item })) : [];
+                            renderImagePreview();
+                        }
+                        if (mi !== null) {
+                            const failedMsg = convs[activeId]?.msgs?.[mi];
+                            if (failedMsg?.role === 'model') {
+                                failedMsg.text = failedMsg.text || `[Falha: ${friendlyMsg}]`;
+                                pushMessageTrace(failedMsg, createTraceStep('error', {
+                                    title: 'Falha',
+                                    body: friendlyMsg
+                                }));
+                                updateMessageChatJob(activeId, mi, {
+                                    status: 'failed',
+                                    finishedAt: Date.now(),
+                                    error: { message: friendlyMsg }
+                                }, false);
+                            }
+                        }
                         toast('❌ ' + friendlyMsg.slice(0, 70));
                     }
                     saveConvs();
+                    renderChat();
                 } finally {
                     clearTimeout(autoAbort);
                     generationControllers.delete(requestId);
@@ -6281,7 +7137,10 @@ return item;`
 
             function stop() {
                 generationControllers.forEach(controller => {
-                    try { controller.abort(); } catch (_) { }
+                    try {
+                        controller._stopReason = 'manual';
+                        controller.abort();
+                    } catch (_) { }
                 });
             }
 
@@ -6362,8 +7221,10 @@ return item;`
                 loadCfg();
                 await loadPlugins();
                 initMermaid();
+                bindConversationStorageSync();
                 renderSidebar();
                 renderChat();
+                resumePendingChatJobs();
                 // Restore sidebar collapsed state on desktop
                 if (window.innerWidth > 768 && localStorage.getItem('gc_sb_collapsed') === '1') {
                     document.getElementById('sidebar').classList.add('collapsed');
@@ -6634,6 +7495,7 @@ return item;`
             const TTS_KEY = 'abelhadomato';
             const TTS_FIRST_CHUNK_MAX_CHARS = 120;
             const TTS_MAX_CHARS_PER_CHUNK = 250;
+            const TTS_PREFETCH_AHEAD = 2;
             let ttsAudio = null;
             let ttsPlaying = false;
             let ttsVoices = [];
@@ -6833,6 +7695,7 @@ return item;`
                 const activeAudio = ttsAudio;
                 const resolveAudio = ttsCurrentAudioResolver;
                 ttsCurrentAudioResolver = null;
+                ttsSessionCounter += 1;
                 if (activeAudio) {
                     activeAudio.onended = null;
                     activeAudio.onerror = null;
@@ -6911,6 +7774,14 @@ return item;`
                 });
             }
 
+            function ttsPrimeChunkWindow(chunks, voice, currentChunkIndex, sessionId, prefetchAhead = TTS_PREFETCH_AHEAD) {
+                if (!ttsIsSessionActive(sessionId)) return;
+                const safeAhead = Math.max(0, Number(prefetchAhead) || 0);
+                for (let offset = 0; offset <= safeAhead; offset += 1) {
+                    ttsPrefetchNext(chunks, voice, currentChunkIndex + offset, sessionId);
+                }
+            }
+
             function ttsPlayAudioUrl(audioUrl, sessionId) {
                 return new Promise((resolve, reject) => {
                     if (!ttsIsSessionActive(sessionId)) {
@@ -6942,19 +7813,19 @@ return item;`
             }
 
             async function ttsPlayChunkQueue(idx, chunks, voice, sessionId) {
+                ttsPrimeChunkWindow(chunks, voice, 0, sessionId);
                 for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
                     if (!ttsIsSessionActive(sessionId)) return 'interrupted';
 
                     const currentChunk = chunks[chunkIndex];
                     ttsSetBarLabel(currentChunk, chunkIndex, chunks.length);
 
+                    ttsPrimeChunkWindow(chunks, voice, chunkIndex, sessionId);
                     const audioUrl = await ttsFetchChunkAudio(currentChunk, voice, chunkIndex, sessionId);
                     if (!ttsIsSessionActive(sessionId)) return 'interrupted';
                     if (!audioUrl) return 'interrupted';
 
-                    if (chunkIndex + 1 < chunks.length) {
-                        ttsPrefetchNext(chunks, voice, chunkIndex + 1, sessionId);
-                    }
+                    ttsPrimeChunkWindow(chunks, voice, chunkIndex + 1, sessionId);
 
                     const playStatus = await ttsPlayAudioUrl(audioUrl, sessionId);
                     if (playStatus !== 'ended') return playStatus;
@@ -6971,107 +7842,6 @@ return item;`
                     return 'completed';
                 }
                 return 'interrupted';
-            }
-
-            async function ttsSpeakMsg(idx) {
-                const msgs = convs[activeId]?.msgs;
-                if (!msgs?.[idx]) return;
-                const rawText = msgs[idx].text || '';
-                // Strip markdown syntax for cleaner TTS
-                const text = rawText
-                    .replace(/```[\s\S]*?```/g, ' [bloco de código] ')
-                    .replace(/`[^`]+`/g, match => match.slice(1, -1))
-                    .replace(/#{1,6}\s/g, '')
-                    .replace(/\*\*(.*?)\*\*/g, '$1')
-                    .replace(/\*(.*?)\*/g, '$1')
-                    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-                    .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
-                    .replace(/^[\s]*[-*+][\s]/gm, '')
-                    .replace(/\n{2,}/g, '. ')
-                    .replace(/\n/g, ' ')
-                    .trim()
-                    .slice(0, 2000);
-
-                if (!text) { toast('⚠ Mensagem vazia.'); return; }
-
-                const voice = document.getElementById('tts-voice-sel')?.value;
-                if (!voice) { toast('⚠ Selecione uma voz em Configuracoes > TTS.'); return; }
-
-                // Stop current if any without rearming Live Mode mid-response
-                ttsStop(undefined, { preserveLiveState: true });
-
-                // Update UI
-                ttsMsgIndex = idx;
-                ttsPlaying = true;
-                const btn = document.getElementById('tts-btn-' + idx);
-                if (btn) btn.classList.add('playing');
-                const bar = document.getElementById('tts-bar');
-                const lbl = document.getElementById('tts-bar-label');
-                if (bar) bar.classList.add('on');
-                if (lbl) lbl.textContent = text.slice(0, 60) + (text.length > 60 ? '…' : '');
-
-                try {
-                    console.log('[TTS] voice selecionada no select:', voice);
-                    console.log('[TTS] texto enviado:', text.slice(0, 80));
-                    const payload = { chavesecreta: TTS_KEY, voz: voice, texto: text };
-                    const res = await fetch(TTS_API, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payload)
-                    });
-                    if (!res.ok) {
-                        let errMsg = 'HTTP ' + res.status;
-                        try {
-                            const ct = res.headers.get('content-type') || '';
-                            const errBody = ct.includes('json') ? await res.json() : await res.text();
-                            if (typeof errBody === 'object') errMsg += ': ' + (errBody.error || JSON.stringify(errBody));
-                            else if (errBody) errMsg += ': ' + String(errBody).slice(0, 120);
-                        } catch (_) { }
-                        console.error('[TTS] POST error:', errMsg);
-                        throw new Error(errMsg);
-                    }
-
-                    const blob = await res.blob();
-                    const url = URL.createObjectURL(blob);
-                    ttsAudio = new Audio(url);
-
-                    ttsAudio.onended = () => ttsStop(idx);
-                    ttsAudio.onerror = () => { toast('⚠ Erro ao reproduzir áudio.'); ttsStop(idx); };
-                    ttsAudio.play();
-                } catch (e) {
-                    toast('⚠ TTS: ' + e.message);
-                    ttsStop(idx);
-                }
-            }
-
-            function ttsStop(idx, opts = {}) {
-                const hadActivePlayback = !!ttsAudio || ttsPlaying;
-                if (ttsAudio) {
-                    ttsAudio.pause();
-                    ttsAudio = null;
-                }
-                ttsPlaying = false;
-                const i = idx ?? ttsMsgIndex;
-                if (i !== null) {
-                    const btn = document.getElementById('tts-btn-' + i);
-                    if (btn) btn.classList.remove('playing');
-                }
-                ttsMsgIndex = null;
-                document.getElementById('tts-bar')?.classList.remove('on');
-                if (
-                    hadActivePlayback &&
-                    !opts.fromLiveHandler &&
-                    !opts.preserveLiveState &&
-                    liveMode &&
-                    liveState === 'playing' &&
-                    liveSpeakResolver
-                ) {
-                    const resolve = liveSpeakResolver;
-                    liveSpeakResolver = null;
-                    resolve('interrupted');
-                    liveSetHUD('listening', '🎙 Interrompido, pode falar');
-                    setTimeout(() => liveResumeListening(), 120);
-                }
             }
 
             async function ttsSpeakMsg(idx) {
@@ -7102,6 +7872,7 @@ return item;`
                 try {
                     console.log('[TTS] voice selecionada no select:', voice);
                     console.log('[TTS] texto total/chunks:', text.length, chunks.length);
+                    console.log('[TTS] janela de prefetch:', TTS_PREFETCH_AHEAD);
                     return await ttsPlayChunkQueue(idx, chunks, voice, sessionId);
                 } catch (e) {
                     toast('âš  TTS: ' + e.message);
@@ -7142,7 +7913,6 @@ return item;`
             let liveRecognition = null;
             let liveRecognitionActive = false;
             let liveIgnoreSTT = false;
-            let liveSpeakResolver = null;
             let liveAccum = '';
             let liveLastDisplay = '';
             let liveIgnoreUntil = 0;
@@ -7429,6 +8199,7 @@ return item;`
                             return `🔧 **${fc.name}**(${argStr})\n\`\`\`json\n${resultStr}\n\`\`\``;
                         }).join('\n\n');
                         convs[activeId].msgs.push({
+                            id: newMessageId('msg'),
                             role: 'model', text: toolText, ts: Date.now(),
                             model: this.sessionModel, live: true
                         });
@@ -7614,6 +8385,7 @@ return item;`
                     // Save user speech transcript (what they said via mic)
                     if (this.pendingUserTranscript.trim()) {
                         convs[activeId].msgs.push({
+                            id: newMessageId('msg'),
                             role: 'user',
                             text: this.pendingUserTranscript.trim(),
                             ts: Date.now(),
@@ -7637,6 +8409,7 @@ return item;`
                             body: this.pendingTranscript.trim() || 'Turno sem texto final visivel.'
                         }));
                         convs[activeId].msgs.push({
+                            id: newMessageId('msg'),
                             role: 'model',
                             text: this.pendingTranscript.trim() || '[Trace do live disponivel abaixo.]',
                             ts: Date.now(),
@@ -8190,49 +8963,8 @@ return item;`
             }
 
             // ─ Fala e aguarda fim ─
-            function liveSpeak(msgIdx) {
-                return new Promise(async resolve => {
-                    if (!liveMode) { resolve(); return; }
-                    liveSpeakResolver = resolve;
-
-                    await ttsSpeakMsg(msgIdx);
-
-                    if (!ttsAudio) {
-                        if (liveSpeakResolver) {
-                            const done = liveSpeakResolver;
-                            liveSpeakResolver = null;
-                            done('no-audio');
-                        }
-                        if (liveMode) setTimeout(() => liveResumeListening(), 200);
-                        return;
-                    }
-
-                    ttsAudio.onended = () => {
-                        ttsStop(msgIdx, { fromLiveHandler: true });
-                        if (liveSpeakResolver) {
-                            const done = liveSpeakResolver;
-                            liveSpeakResolver = null;
-                            done('ended');
-                        }
-                        if (liveMode) setTimeout(() => liveResumeListening(), 200);
-                    };
-
-                    ttsAudio.onerror = () => {
-                        ttsStop(msgIdx, { fromLiveHandler: true });
-                        if (liveSpeakResolver) {
-                            const done = liveSpeakResolver;
-                            liveSpeakResolver = null;
-                            done('errored');
-                        }
-                        if (liveMode) setTimeout(() => liveResumeListening(), 200);
-                    };
-                });
-            }
-
-            // ─ Retoma escuta: reinicia recognition do zero ─
             async function liveSpeak(msgIdx) {
                 if (!liveMode) return 'inactive';
-                liveSpeakResolver = null;
 
                 const status = await ttsSpeakMsg(msgIdx);
                 if (!liveMode) return status;
@@ -8287,7 +9019,6 @@ return item;`
                     liveRecognition = null;
                 }
                 liveRecognitionActive = false;
-                liveSpeakResolver = null;
                 liveRestartAttempts = 0;
                 liveNoSpeechCount = 0;
 

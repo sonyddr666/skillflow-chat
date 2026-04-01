@@ -4,6 +4,7 @@
         'gc_theme',
         'gc_plugins',
         'gc_convs',
+        'gc_activeId',
         'gc_user_memory',
         'gc_pending_approvals',
         'gc_skill_packs',
@@ -24,13 +25,16 @@
     let currentUser = null;
     let lastSnapshot = '';
     let syncTimer = null;
+    let healthTimer = null;
     let syncLoopStarted = false;
     let shellMounted = false;
     let syncFailures = 0;
     let syncBackoffMs = 2000;
     const SYNC_MAX_BACKOFF = 60000;
     const SYNC_MAX_FAILURES = 10;
+    const HEALTH_POLL_MS = 15000;
     let syncPaused = false;
+    let backendOnline = true;
 
     function isQuotaExceededError(error) {
         return error?.name === 'QuotaExceededError'
@@ -129,6 +133,88 @@
         return JSON.stringify(ordered);
     }
 
+    function messageFreshness(message, fallbackTs = 0) {
+        if (!message || typeof message !== 'object') return fallbackTs || 0;
+        const chatJob = message.chatJob && typeof message.chatJob === 'object' ? message.chatJob : null;
+        return Math.max(
+            Number(message.ts) || 0,
+            Number(chatJob?.updatedAt) || 0,
+            Number(chatJob?.startedAt) || 0,
+            fallbackTs || 0
+        );
+    }
+
+    function conversationFreshness(conversation) {
+        if (!conversation || typeof conversation !== 'object') return 0;
+        const baseTs = Number(conversation.ts) || 0;
+        const msgs = Array.isArray(conversation.msgs) ? conversation.msgs : [];
+        return msgs.reduce((maxTs, message) => Math.max(maxTs, messageFreshness(message, baseTs)), baseTs);
+    }
+
+    function hasPendingChatJob(conversation) {
+        const msgs = Array.isArray(conversation?.msgs) ? conversation.msgs : [];
+        return msgs.some(message => {
+            if (message?.role !== 'model') return false;
+            const status = String(message?.chatJob?.status || '').toLowerCase();
+            return status && !['completed', 'failed', 'cancelled'].includes(status);
+        });
+    }
+
+    function mergeConversationMaps(localConvs, remoteConvs) {
+        const merged = {};
+        const local = localConvs && typeof localConvs === 'object' && !Array.isArray(localConvs) ? localConvs : {};
+        const remote = remoteConvs && typeof remoteConvs === 'object' && !Array.isArray(remoteConvs) ? remoteConvs : {};
+        const ids = new Set([...Object.keys(remote), ...Object.keys(local)]);
+
+        for (const id of ids) {
+            const localConversation = local[id];
+            const remoteConversation = remote[id];
+            if (!localConversation) {
+                merged[id] = remoteConversation;
+                continue;
+            }
+            if (!remoteConversation) {
+                merged[id] = localConversation;
+                continue;
+            }
+
+            const localFreshness = conversationFreshness(localConversation);
+            const remoteFreshness = conversationFreshness(remoteConversation);
+            const localPending = hasPendingChatJob(localConversation);
+            const remotePending = hasPendingChatJob(remoteConversation);
+            const localMsgCount = Array.isArray(localConversation.msgs) ? localConversation.msgs.length : 0;
+            const remoteMsgCount = Array.isArray(remoteConversation.msgs) ? remoteConversation.msgs.length : 0;
+
+            if (localPending && !remotePending) {
+                merged[id] = localConversation;
+                continue;
+            }
+            if (localFreshness > remoteFreshness) {
+                merged[id] = localConversation;
+                continue;
+            }
+            if (remoteFreshness > localFreshness) {
+                merged[id] = remoteConversation;
+                continue;
+            }
+            merged[id] = localMsgCount >= remoteMsgCount ? localConversation : remoteConversation;
+        }
+
+        return merged;
+    }
+
+    function mergeState(localState, remoteState) {
+        const local = localState && typeof localState === 'object' ? localState : {};
+        const remote = remoteState && typeof remoteState === 'object' ? remoteState : {};
+        const merged = { ...remote, ...local };
+
+        if (Object.prototype.hasOwnProperty.call(local, 'gc_convs') || Object.prototype.hasOwnProperty.call(remote, 'gc_convs')) {
+            merged.gc_convs = mergeConversationMaps(local.gc_convs, remote.gc_convs);
+        }
+
+        return merged;
+    }
+
     function hydrateState(state) {
         clearTrackedState();
         const safeState = state && typeof state === 'object' ? state : {};
@@ -162,10 +248,11 @@
 
     async function bootstrap() {
         try {
+            const localState = collectState();
             const me = await fetchJson('/auth/me');
             currentUser = me.user || null;
             const statePayload = await fetchJson('/api/state');
-            hydrateState(statePayload.state || {});
+            hydrateState(mergeState(localState, statePayload.state || {}));
             return { authenticated: true, user: currentUser };
         } catch (error) {
             currentUser = null;
@@ -185,6 +272,47 @@
         badge.dataset.state = state;
     }
 
+    function renderShellStatus(preferredText = null, preferredState = null) {
+        if (!backendOnline) {
+            updateSyncBadge('Backend offline', 'error');
+            return;
+        }
+        if (preferredText) {
+            updateSyncBadge(preferredText, preferredState || 'ok');
+            return;
+        }
+        const badge = document.getElementById('account-sync-status');
+        const currentState = badge?.dataset?.state || '';
+        if (currentState === 'busy') {
+            updateSyncBadge('Salvando...', 'busy');
+            return;
+        }
+        if (syncPaused) {
+            updateSyncBadge('Sync pausado', 'error');
+            return;
+        }
+        if (syncFailures > 0) {
+            updateSyncBadge('Falha (' + syncFailures + ')', 'error');
+            return;
+        }
+        updateSyncBadge('Salvo', 'ok');
+    }
+
+    async function checkBackendHealth() {
+        try {
+            const res = await fetch('/health', {
+                method: 'GET',
+                cache: 'no-store',
+                credentials: 'same-origin'
+            });
+            backendOnline = res.ok;
+        } catch (_) {
+            backendOnline = false;
+        }
+        renderShellStatus();
+        return backendOnline;
+    }
+
     async function syncState(options = {}) {
         if (!currentUser) return;
         const state = collectState();
@@ -202,7 +330,7 @@
             return;
         }
 
-        updateSyncBadge('Salvando...', 'busy');
+        renderShellStatus('Salvando...', 'busy');
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 30000);
         try {
@@ -231,17 +359,19 @@
             syncFailures = 0;
             syncBackoffMs = 2000;
             syncPaused = false;
-            updateSyncBadge('Salvo', 'ok');
+            backendOnline = true;
+            renderShellStatus('Salvo', 'ok');
         } catch (err) {
             clearTimeout(timeout);
+            backendOnline = false;
             syncFailures++;
             syncBackoffMs = Math.min(syncBackoffMs * 2, SYNC_MAX_BACKOFF);
             if (syncFailures >= SYNC_MAX_FAILURES) {
                 syncPaused = true;
-                updateSyncBadge('Sync pausado', 'error');
+                renderShellStatus('Sync pausado', 'error');
                 console.warn('[Sync] Pausado após ' + syncFailures + ' falhas consecutivas.');
             } else {
-                updateSyncBadge('Falha (' + syncFailures + ')', 'error');
+                renderShellStatus('Falha (' + syncFailures + ')', 'error');
             }
             throw err;
         }
@@ -280,6 +410,11 @@
             const snapshot = stableStateString(collectState());
             if (snapshot !== lastSnapshot) scheduleSync(syncFailures > 0 ? syncBackoffMs : 1500);
         }, 3000);
+
+        void checkBackendHealth();
+        healthTimer = setInterval(() => {
+            void checkBackendHealth();
+        }, HEALTH_POLL_MS);
     }
 
     function injectShellStyles() {

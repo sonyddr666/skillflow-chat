@@ -265,6 +265,47 @@ Ler:
 GET /api/fs/read?path=docs/arquivo.txt
 ```
 
+Ler com truncamento controlado:
+
+```text
+GET /api/fs/read?path=docs/arquivo.txt&max_bytes=32768
+```
+
+### Chat jobs persistentes
+
+Criar um job de chat no backend:
+
+```text
+POST /api/chat/jobs
+```
+
+Exemplo Gemini:
+
+```json
+{
+  "provider": "gemini",
+  "model": "gemini-2.5-flash",
+  "request": {
+    "contents": [
+      { "role": "user", "parts": [{ "text": "ola" }] }
+    ]
+  }
+}
+```
+
+Consultar status e snapshot:
+
+```text
+GET /api/chat/jobs/<job_id>
+```
+
+O backend responde com:
+
+- `job.status`: `running`, `completed` ou `failed`
+- `raw_sse`: stream bruto salvo do Gemini
+- `result`: payload final salvo do Codex
+- `job.error`: erro persistido quando o job falha
+
 Escrever:
 
 ```json
@@ -320,6 +361,96 @@ Exemplos:
 - autenticacao e local, sem provedor externo
 - sessoes ficam em memoria do processo
 - nao existe permissao por papel
-- nao existe sandbox de execucao arbitraria no servidor
+- execucao arbitraria foi endurecida por politica basica de comandos permitidos
 - operacoes de arquivo ficam restritas a pasta do usuario
 - skills custom persistem como JSON, nao como um sistema de plugins distribuido
+
+## Hardening recente
+
+- requests JSON agora possuem limite de tamanho e retornam `413` quando excedem o limite
+- bodies JSON invalidos retornam `400` em vez de erro generico
+- `GET /api/fs/read` aceita `max_bytes` e retorna `truncated`
+- rotas e assets agora enviam headers basicos de seguranca
+- login e cadastro possuem rate limit basico em memoria por IP
+- o fluxo Gemini REST agora passa pelo backend em `/api/chat`, evitando expor a chave na query string do navegador
+- o frontend agora cria `chat jobs` persistentes em `/api/chat/jobs` para nao perder a resposta quando a aba cai no meio
+
+## Gemini pelo backend
+
+Para o fluxo REST normal do Gemini, o backend aceita:
+
+- `GEMINI_API_KEY` no ambiente do servidor
+- ou `api_key` enviada pelo cliente como fallback de compatibilidade
+
+Recomendado para deploy:
+
+- definir `GEMINI_API_KEY` no servidor
+- evitar depender da chave no navegador
+
+## Respostas persistentes no backend
+
+O fluxo simples implementado agora funciona assim:
+
+1. no clique em enviar, o frontend persiste imediatamente a mensagem do usuario e um placeholder de resposta no `localStorage`
+2. depois disso, o frontend cria um job em `POST /api/chat/jobs`
+3. o backend continua a chamada ao provider mesmo se a aba sumir
+4. o progresso fica salvo em disco por usuario
+5. ao voltar, o frontend consulta `GET /api/chat/jobs/:id` e remonta a resposta
+6. se a aba cair antes de existir `job_id`, o frontend reconstrói o request salvo e cria o job na retomada
+
+Na pratica, isso resolve dois casos:
+
+- perder a resposta no meio da geracao
+- perder a propria mensagem se a aba fechar cedo, antes da criacao do job
+- perder a ultima mensagem ao usar duas abas na mesma conversa, porque o `gc_convs` agora faz merge antes de salvar
+- deixar a outra aba desatualizada, porque mudancas em `gc_convs` agora rerenderizam a conversa aberta via evento `storage`
+
+Limites desta versao:
+
+- o job e persistente por chamada ao provider, nao por workflow inteiro
+- function calling continua sendo orquestrado pelo frontend quando ele volta
+- o botao de parar interrompe o acompanhamento local, mas o job no backend pode continuar ate terminar
+- a UI recompõe a resposta por polling curto do job; o Gemini agora atualiza a bolha com mais frequencia, mas ainda nao usa SSE reanexavel por `job_id`
+
+## Microfone e camera
+
+Os headers de seguranca do servidor agora permitem microfone e camera para o proprio site (`self`).
+
+Se o navegador ainda mostrar bloqueio, os motivos passam a ser os usuais do browser:
+
+- permissao negada anteriormente para o site
+- pagina fora de contexto seguro (`https` ou `localhost`)
+- outro app ou aba segurando o dispositivo
+
+## TTS
+
+O pipeline de TTS agora mantem uma janela de prefetch com pelo menos 2 chunks a frente para reduzir o silencio entre geracoes.
+
+Ao clicar em parar, a sessao inteira de TTS e invalidada:
+
+- o audio atual e pausado
+- os fetches pendentes dos proximos chunks sao abortados
+- URLs temporarias de audio sao revogadas
+- respostas atrasadas da sessao anterior deixam de ser aproveitadas
+
+## Execucao no servidor
+
+Por padrao, `/api/exec` aceita apenas comandos em uma allowlist minima:
+
+- `node`
+- `npm`
+- `npx`
+- `python`
+- `python3`
+- `py`
+- `deno`
+- `bash`
+- `sh`
+
+Por padrao, `shell=true` fica bloqueado.
+
+Variaveis de ambiente:
+
+- `SKILLFLOW_EXEC_ALLOW_SHELL=true` para liberar `shell=true`
+- `SKILLFLOW_EXEC_ALLOWED_BINS=node,python,python3,bash` para customizar a allowlist
+- `SKILLFLOW_EXEC_ALLOWED_BINS=*` para liberar qualquer binario
