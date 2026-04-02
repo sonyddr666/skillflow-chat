@@ -5167,6 +5167,50 @@ return item;`
                 return value && typeof value === 'object' ? value : {};
             }
 
+            function messageContentFingerprint(message) {
+                if (!message || typeof message !== 'object') return 'empty';
+                const chatJob = message.chatJob && typeof message.chatJob === 'object' ? message.chatJob : null;
+                const attachments = [
+                    ...(Array.isArray(message.imgs) ? message.imgs : []),
+                    ...(Array.isArray(message.files) ? message.files : [])
+                ].map((item) => {
+                    if (!item || typeof item !== 'object') return '';
+                    return [
+                        String(item.name || ''),
+                        String(item.mimeType || item.type || ''),
+                        String(item.path || ''),
+                        String(item.downloadUrl || '')
+                    ].join('|');
+                });
+
+                return JSON.stringify({
+                    role: message.role || '',
+                    text: typeof message.text === 'string' ? message.text : '',
+                    model: message.model || '',
+                    live: !!message.live,
+                    provider: chatJob?.provider || '',
+                    status: chatJob?.status || '',
+                    attachments,
+                    traceLen: Array.isArray(message.trace) ? message.trace.length : 0
+                });
+            }
+
+            function dedupeConversationMessages(messages, maxGapMs = 5000) {
+                const list = Array.isArray(messages) ? messages : [];
+                const deduped = [];
+                for (const message of list) {
+                    if (!message || typeof message !== 'object') continue;
+                    const previous = deduped[deduped.length - 1];
+                    const sameFingerprint = previous
+                        && messageContentFingerprint(previous) === messageContentFingerprint(message);
+                    const gap = Math.abs(importedTimestamp(message.ts || message.updated_at || message.created_at, 0)
+                        - importedTimestamp(previous?.ts || previous?.updated_at || previous?.created_at, 0));
+                    if (sameFingerprint && gap <= maxGapMs) continue;
+                    deduped.push(message);
+                }
+                return deduped;
+            }
+
             function conversationTitle(value, fallback = 'Conversa sem titulo') {
                 const conversation = conversationRecord(value);
                 return typeof conversation.title === 'string' && conversation.title.trim()
@@ -5176,9 +5220,10 @@ return item;`
 
             function conversationMessages(value) {
                 const conversation = conversationRecord(value);
-                return Array.isArray(conversation.msgs)
+                const msgs = Array.isArray(conversation.msgs)
                     ? conversation.msgs
                     : (Array.isArray(conversation.messages) ? conversation.messages : []);
+                return dedupeConversationMessages(msgs);
             }
 
             function conversationTs(value) {
@@ -5704,7 +5749,7 @@ return item;`
             }
 
             function updateMessageChatJob(convId, msgIndex, patch = {}, saveNow = true) {
-                const message = convs?.[convId]?.msgs?.[msgIndex];
+                const message = getConversationMessage(convId, msgIndex);
                 if (!message || message.role !== 'model') return null;
                 message.chatJob = {
                     ...(message.chatJob && typeof message.chatJob === 'object' ? message.chatJob : {}),
@@ -5715,7 +5760,7 @@ return item;`
             }
 
             function getConversationMessage(convId, msgIndex) {
-                return convs?.[convId]?.msgs?.[msgIndex] || null;
+                return conversationMessages(convs?.[convId])?.[msgIndex] || null;
             }
 
             function findConversationMessageIndex(convId, messageId) {
@@ -5838,7 +5883,7 @@ return item;`
             }
 
             function applyChatJobSnapshotToMessage(convId, msgIndex, snapshot) {
-                const message = convs?.[convId]?.msgs?.[msgIndex];
+                const message = getConversationMessage(convId, msgIndex);
                 if (!message || message.role !== 'model') return;
 
                 const provider = snapshot?.job?.provider || message?.chatJob?.provider || '';
@@ -6000,12 +6045,13 @@ return item;`
 
             function rebuildPendingChatRequest(convId, msgIndex) {
                 const conversation = convs?.[convId];
-                const message = conversation?.msgs?.[msgIndex];
+                const messages = conversationMessages(conversation);
+                const message = messages?.[msgIndex];
                 const job = message?.chatJob;
                 const resumeState = job?.resumeState;
                 if (!conversation || !message || message.role !== 'model' || !resumeState) return null;
 
-                const historyMessages = conversation.msgs.slice(0, msgIndex);
+                const historyMessages = messages.slice(0, msgIndex);
                 if (resumeState.provider === 'codex') {
                     return {
                         provider: 'codex',
@@ -6036,7 +6082,7 @@ return item;`
 
             function resumePendingChatJobs() {
                 Object.entries(convs || {}).forEach(([convId, conversation]) => {
-                    const msgs = Array.isArray(conversation?.msgs) ? conversation.msgs : [];
+                    const msgs = conversationMessages(conversation);
                     msgs.forEach((message, msgIndex) => {
                         const job = message?.chatJob;
                         if (!job) return;
@@ -6125,7 +6171,7 @@ return item;`
                 activeId = id;
                 saveConvs();
                 renderSidebar();
-                renderChat();
+                renderChat(true);
                 if (window.innerWidth <= 768) closeSidebar();
             }
             function delConv(id, e) {
@@ -6182,9 +6228,13 @@ return item;`
                 return html;
             }
 
-            function renderChat() {
+            function renderChat(forceScrollToBottom = false) {
                 const c = document.getElementById('chat');
                 const messages = activeId ? conversationMessages(convs[activeId]) : [];
+                const prevScrollTop = c?.scrollTop || 0;
+                const prevScrollHeight = c?.scrollHeight || 0;
+                const prevClientHeight = c?.clientHeight || 0;
+                const shouldStickToBottom = !!forceScrollToBottom || chatStickToBottom || isChatNearBottom(c);
                 if (!activeId || !messages.length) {
                     c.innerHTML = `<div id="empty">
       <div class="logo">✦</div>
@@ -6220,9 +6270,17 @@ return item;`
                 chatRenderedFrom = from;
                 chatRenderedCount = slice.length;
 
-                scrollEnd();
+                if (shouldStickToBottom) {
+                    queueChatScrollToBottom(true);
+                } else {
+                    restoreChatScrollPosition(prevScrollTop, prevScrollHeight, prevClientHeight);
+                }
                 updateScrollBottomButton();
-                requestAnimationFrame(() => renderMermaidBlocks());
+                requestAnimationFrame(async () => {
+                    await renderMermaidBlocks();
+                    if (shouldStickToBottom) queueChatScrollToBottom(true);
+                    else updateScrollBottomButton();
+                });
 
                 // Setup IntersectionObserver for auto-loading older messages
                 setupChatObserver();
@@ -6568,20 +6626,53 @@ return item;`
             function esc(s) {
                 return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
             }
+            let chatStickToBottom = true;
+            let chatScrollRaf = 0;
+
+            function isChatNearBottom(c, threshold = 180) {
+                if (!c) return true;
+                return (c.scrollHeight - c.scrollTop - c.clientHeight) <= threshold;
+            }
+
             function updateScrollBottomButton() {
                 const c = document.getElementById('chat');
                 const btn = document.getElementById('scroll-bottom-btn');
                 if (!c || !btn) return;
                 const distance = c.scrollHeight - c.scrollTop - c.clientHeight;
                 btn.classList.toggle('show', distance > 220);
+                chatStickToBottom = distance <= 180;
             }
-            function scrollEnd() {
+
+            function queueChatScrollToBottom(force = false) {
+                const c = document.getElementById('chat');
+                if (!c) return;
+                if (force) chatStickToBottom = true;
+                if (!force && !chatStickToBottom) return;
+                if (chatScrollRaf) cancelAnimationFrame(chatScrollRaf);
+                chatScrollRaf = requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        const current = document.getElementById('chat');
+                        if (!current) return;
+                        current.scrollTop = current.scrollHeight;
+                        updateScrollBottomButton();
+                        chatScrollRaf = 0;
+                    });
+                });
+            }
+
+            function restoreChatScrollPosition(prevTop, prevScrollHeight, prevClientHeight) {
                 requestAnimationFrame(() => {
                     const c = document.getElementById('chat');
                     if (!c) return;
-                    c.scrollTop = c.scrollHeight;
+                    const previousGap = Math.max(0, prevScrollHeight - prevTop - prevClientHeight);
+                    const nextTop = Math.max(0, c.scrollHeight - c.clientHeight - previousGap);
+                    c.scrollTop = nextTop;
                     updateScrollBottomButton();
                 });
+            }
+
+            function scrollEnd(force = false) {
+                queueChatScrollToBottom(force);
             }
             function toast(msg) {
                 const t = document.getElementById('toast'); t.textContent = msg;
@@ -6747,8 +6838,8 @@ return item;`
                 convs[conversationId].ts = Date.now();
                 saveConvs();
                 renderSidebar();
-                renderChat();
-                scrollEnd();
+                renderChat(true);
+                scrollEnd(true);
 
                 const refreshModelIndex = () => {
                     mi = findConversationMessageIndex(conversationId, modelMessageId);
@@ -6797,7 +6888,7 @@ return item;`
                     if (filesToSave.length) msgData.files = filesToSave;
                     else delete msgData.files;
                     saveConvs();
-                    renderChat();
+                    renderChat(true);
 
                     const body = buildGeminiRequestFromMessages(getCurrentHistoryMessages(), {
                         model,
@@ -6901,7 +6992,7 @@ return item;`
           <span style="display:inline-block;animation:bop 1s infinite">&#128269;</span>
           <span>Chamando ${callLabels} ...</span>
         </div>`;
-                            scrollEnd();
+                            scrollEnd(true);
 
                             const results = await Promise.all(
                                 fnCallParts.map(p => executePlugin(p.functionCall.name, p.functionCall.args || {}))
@@ -7019,7 +7110,7 @@ return item;`
           <span style="display:inline-block;animation:bop 1s infinite">&#128269;</span>
           <span>Chamando ${callLabels} ...</span>
         </div>`;
-                            scrollEnd();
+                            scrollEnd(true);
 
                             const results = await Promise.all(
                                 toolCalls.map(call => executePlugin(call.name, call.arguments || {}))
@@ -7069,7 +7160,7 @@ return item;`
                         if (full) {
                             const currentBubble = getCurrentModelBubble();
                             if (currentBubble) currentBubble.innerHTML = renderMarkdown(full);
-                            scrollEnd();
+                            scrollEnd(true);
                         }
                     } else {
                         ({ full, tok, sig, files: modelFiles } = await callAPI(body, bub));
@@ -7077,10 +7168,10 @@ return item;`
 
                     // ─ FINALIZE ─
                     const currentModelIndex = refreshModelIndex();
-                    if (currentModelIndex < 0 || !convs?.[conversationId]?.msgs?.[currentModelIndex]) {
+                    const currentModelMessage = getConversationMessage(conversationId, currentModelIndex);
+                    if (currentModelIndex < 0 || !currentModelMessage) {
                         throw new Error('Resposta em andamento nao encontrada na conversa apos a sincronizacao.');
                     }
-                    const currentModelMessage = convs[conversationId].msgs[currentModelIndex];
                     currentModelMessage.text = full || (usingCodex
                         ? '[Resposta vazia — o Codex não retornou texto.]'
                         : '[Resposta vazia — o modelo executou ferramentas sem gerar texto.]');
@@ -7126,14 +7217,14 @@ return item;`
                         if (document.getElementById('tts-autoplay')?.checked && !liveMode) ttsSpeakMsg(currentModelIndex);
                     }
                     saveConvs();
-                    renderChat();
+                    renderChat(true);
 
                 } catch (err) {
                     if (err.name === 'AbortError') {
                         toast('⏹ Geração interrompida.');
                         const currentIndex = refreshModelIndex();
                         if (currentIndex !== null && currentIndex >= 0) {
-                            const abortedMsg = convs[conversationId]?.msgs?.[currentIndex];
+                            const abortedMsg = getConversationMessage(conversationId, currentIndex);
                             const shouldDiscardPlaceholder = requestCtrl._stopReason === 'manual';
                             if (abortedMsg?.role === 'model' && !abortedMsg.text && shouldDiscardPlaceholder && convs?.[conversationId]?.msgs) {
                                 convs[conversationId].msgs.splice(currentIndex, 1);
@@ -7158,7 +7249,7 @@ return item;`
                         }
                         const currentIndex = refreshModelIndex();
                         if (currentIndex !== null && currentIndex >= 0) {
-                            const failedMsg = convs[conversationId]?.msgs?.[currentIndex];
+                            const failedMsg = getConversationMessage(conversationId, currentIndex);
                             if (failedMsg?.role === 'model') {
                                 failedMsg.text = failedMsg.text || `[Falha: ${friendlyMsg}]`;
                                 pushMessageTrace(failedMsg, createTraceStep('error', {
@@ -7175,13 +7266,13 @@ return item;`
                         toast('❌ ' + friendlyMsg.slice(0, 70));
                     }
                     saveConvs();
-                    renderChat();
+                    renderChat(true);
                 } finally {
                     clearTimeout(autoAbort);
                     generationControllers.delete(requestId);
                     refreshGenerationUi();
                     renderSidebar();
-                    if (activeId === conversationId) scrollEnd();
+                    if (activeId === conversationId) scrollEnd(true);
                 }
             }
 
@@ -7202,7 +7293,10 @@ return item;`
             window.addEventListener('DOMContentLoaded', () => {
                 const chat = document.getElementById('chat');
                 if (!chat) return;
-                chat.addEventListener('scroll', updateScrollBottomButton, { passive: true });
+                chat.addEventListener('scroll', () => {
+                    updateScrollBottomButton();
+                    chatStickToBottom = isChatNearBottom(chat);
+                }, { passive: true });
                 updateScrollBottomButton();
             });
 
