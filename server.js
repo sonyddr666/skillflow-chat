@@ -1099,6 +1099,23 @@ function extractCodexAccountId(token) {
   return auth.chatgpt_account_id || null;
 }
 
+function parseCodexErrorPayload(raw) {
+  const trimmed = String(raw || "").trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function isCodexDeactivatedWorkspaceError(raw) {
+  const payload = parseCodexErrorPayload(raw);
+  if (!payload || typeof payload !== "object") return false;
+  const code = payload.detail?.code || payload.error?.code || payload.code || null;
+  return String(code || "").trim() === "deactivated_workspace";
+}
+
 function normalizeCodexAuth(input) {
   let auth = input;
   if (typeof auth === "string") {
@@ -1130,11 +1147,19 @@ function normalizeCodexAuth(input) {
     throw new Error("auth invalido: access/access_token ausente.");
   }
 
+  const explicitAccountId = typeof auth.accountId === "string" && auth.accountId.trim()
+    ? auth.accountId.trim()
+    : (typeof auth.chatgpt_account_id === "string" && auth.chatgpt_account_id.trim()
+      ? auth.chatgpt_account_id.trim()
+      : null);
+  const derivedAccountId = explicitAccountId ? null : extractCodexAccountId(access);
+
   return {
     access,
     refresh,
     expires,
-    accountId: auth.accountId || extractCodexAccountId(access)
+    accountId: explicitAccountId || derivedAccountId,
+    accountIdSource: explicitAccountId ? "provided" : (derivedAccountId ? "token" : null)
   };
 }
 
@@ -1159,11 +1184,16 @@ async function refreshCodexAuth(auth) {
   }
 
   const payload = raw ? JSON.parse(raw) : {};
+  const explicitAccountId = auth.accountIdSource === "provided" && typeof auth.accountId === "string" && auth.accountId.trim()
+    ? auth.accountId.trim()
+    : null;
+  const derivedAccountId = explicitAccountId ? null : extractCodexAccountId(payload.access_token);
   return {
     access: payload.access_token,
     refresh: payload.refresh_token || auth.refresh,
     expires: nowMs() + Number(payload.expires_in || 0) * 1000,
-    accountId: auth.accountId || extractCodexAccountId(payload.access_token)
+    accountId: explicitAccountId || derivedAccountId,
+    accountIdSource: explicitAccountId ? "provided" : (derivedAccountId ? "token" : null)
   };
 }
 
@@ -1560,30 +1590,37 @@ async function runCodexChat(payload) {
     };
   }
 
-  const headers = {
-    Authorization: `Bearer ${auth.access}`,
-    "Content-Type": "application/json",
-    Accept: "text/event-stream"
-  };
-  if (auth.accountId) {
-    headers["chatgpt-account-id"] = auth.accountId;
-  }
-
-  const response = await fetch(CODEX_RESPONSES_URL, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model,
-      input: contextMessages,
-      store: false,
-      stream: true,
-      reasoning: { effort: reasoning },
-      instructions,
-      ...(tools.length ? { tools } : {})
-    })
+  const requestBody = JSON.stringify({
+    model,
+    input: contextMessages,
+    store: false,
+    stream: true,
+    reasoning: { effort: reasoning },
+    instructions,
+    ...(tools.length ? { tools } : {})
   });
+  const sendCodexRequest = async (includeAccountId = true) => {
+    const headers = {
+      Authorization: `Bearer ${auth.access}`,
+      "Content-Type": "application/json",
+      Accept: "text/event-stream"
+    };
+    if (includeAccountId && auth.accountId) {
+      headers["chatgpt-account-id"] = auth.accountId;
+    }
+    return fetch(CODEX_RESPONSES_URL, {
+      method: "POST",
+      headers,
+      body: requestBody
+    });
+  };
 
-  const raw = await response.text();
+  let response = await sendCodexRequest(true);
+  let raw = await response.text();
+  if (!response.ok && auth.accountId && auth.accountIdSource !== "provided" && isCodexDeactivatedWorkspaceError(raw)) {
+    response = await sendCodexRequest(false);
+    raw = await response.text();
+  }
   if (!response.ok) {
     throw new Error(raw || `Codex falhou com HTTP ${response.status}`);
   }
